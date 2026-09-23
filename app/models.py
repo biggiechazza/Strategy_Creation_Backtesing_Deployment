@@ -60,15 +60,10 @@ def _validate_cost_points(cost_points: float) -> None:
 @dataclass(frozen=True, kw_only=True)
 class Bar:
     """One completed NQ market bar.
-
-    ``timestamp`` is the source market-data timestamp. The   loader should preserve
-    its timezone information. ``trade_date`` is the supplied futures session date;f
+    ``timestamp`` is the source market data timestamp.The loader should preserve
+    its timezone information. ``trade_date`` is the supplied futures session date
     it must not be inferred from ``timestamp.date()`` because a futures session can
-    cross midnight.
-
-    Structural OHLC and chronological validation deliberately belongs to the data
-    layer rather than this representation.
-    """
+    cross 24:00(midnight). OHLC and chronological validation deliberately belongs to the data scripts."""
 
     timestamp: datetime
     open: float
