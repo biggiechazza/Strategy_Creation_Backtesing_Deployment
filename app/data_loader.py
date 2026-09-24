@@ -18,6 +18,7 @@ Required_columns = (
 Price_columns = ('Open', 'High', 'Low', 'Close')
 Tick_size = Decimal(str(NQ_TICK_SIZE))
 
+# INTERNAL FUNCTIONS --------------------------------------------------------
 def parse_timestamp(value: str | None, row_number: int) -> datetime:
     '''Parse an ISO timestamp while keeping any source timezone offset.'''
 
@@ -71,6 +72,7 @@ def parse_trade_date(value: str | None, row_number: int) -> date:
         raise ValueError(
             f'Invalid trade_date in row {row_number}: {value!r}') from error
 
+# PRIMARY FUNCTION ------------------------------------------------------
 def load_nq_data(path: str | Path): # Returns a list of Bar objects
     '''Returns chronological, validated Bar objects from the NQ CSV file.
     The source trade_date is parsed as a ISO timestamp, preserving its timezone if

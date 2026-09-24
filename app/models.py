@@ -83,7 +83,7 @@ class BacktestConfig:
     """
 
     quantity: int 
-    cost_points_per_trade: float = 2.0
+    cost_points_per_trade: float
 
     def __post_init__(self) -> None:
         """Enforce the V1 quantity range and a usable point cost."""
@@ -166,7 +166,7 @@ class Strategy(Protocol):
     contain the current bar or any future bar. A strategy returns intent only; it
     never mutates engine position, trade, or account state.
     """
-
+# IMPORTS AND NL STRATS TO BE DEFINED LATER VIA FUTURE AGENT
     def evaluate(
         self,
         current_bar: Bar,

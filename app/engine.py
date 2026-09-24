@@ -44,8 +44,9 @@ def _close_position(position: Position, bar: Bar, config: BacktestConfig) -> Tra
             cost_dollars=cost_dollars,
             net_pnl=gross_pnl - cost_dollars,)
 
+# PRIMARY FUNCTION
 def run_backtest(bars: Sequence[Bar], strategy: Strategy,
-        config: BacktestConfig) -> tuple[Trade, ...]:
+    config: BacktestConfig) -> tuple[Trade, ...]:
     '''Evaluate each completed bar, execute at its close, and return all trades.'''
 
     if not bars:
