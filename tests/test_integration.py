@@ -40,7 +40,8 @@ class IntegrationTests(unittest.TestCase):
                         'trade_date': '2024-06-11'})
             bars = load_nq_data(path)
 
-        trades = run_backtest(bars, TimedStrategy(), BacktestConfig(quantity=1))
+        trades = run_backtest(bars, TimedStrategy(),
+            BacktestConfig(quantity=1, cost_points_per_trade=2.0))
         result = calculate_results(trades)
         self.assertEqual(len(bars), 3)
         self.assertEqual(len(trades), 1)

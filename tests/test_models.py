@@ -1,12 +1,9 @@
-"""Focused tests for the shared backtesting domain contracts."""
-
+# Test the shared backtesting domain contracts.
 from __future__ import annotations
-
 import unittest
 from dataclasses import FrozenInstanceError, is_dataclass
 from datetime import date, datetime, timezone
 from typing import Sequence
-
 from app.models import (
     NQ_POINT_VALUE,
     NQ_TICK_SIZE,
@@ -106,27 +103,31 @@ class ModelContractTests(unittest.TestCase):
         self.assertEqual(trade.net_pnl, 80.0)
 
     def test_config_accepts_boundary_quantities(self) -> None:
-        self.assertEqual(BacktestConfig(quantity=1).quantity, 1)
-        self.assertEqual(BacktestConfig(quantity=10).quantity, 10)
+        self.assertEqual(BacktestConfig(quantity=1, cost_points_per_trade=2.0).quantity, 1)
+        self.assertEqual(BacktestConfig(quantity=10, cost_points_per_trade=2.0).quantity, 10)
 
     def test_config_uses_and_retains_trade_cost(self) -> None:
-        self.assertEqual(BacktestConfig(quantity=1).cost_points_per_trade, 2.0)
+        self.assertEqual(BacktestConfig(quantity=1, cost_points_per_trade=0).cost_points_per_trade, 0)
         self.assertEqual(
             BacktestConfig(quantity=1, cost_points_per_trade=1.5).cost_points_per_trade,
             1.5,
         )
 
+    def test_config_requires_trade_cost(self) -> None:
+        with self.assertRaisesRegex(TypeError, 'cost_points_per_trade'):
+            BacktestConfig(quantity=1)  # type: ignore[call-arg]
+
     def test_config_rejects_out_of_range_quantities(self) -> None:
         for quantity in (0, 11):
             with self.subTest(quantity=quantity):
                 with self.assertRaises(ValueError):
-                    BacktestConfig(quantity=quantity)
+                    BacktestConfig(quantity=quantity, cost_points_per_trade=2.0)
 
     def test_config_rejects_non_integer_quantities(self) -> None:
         for quantity in (True, 1.5, "2"):
             with self.subTest(quantity=quantity):
                 with self.assertRaises(TypeError):
-                    BacktestConfig(quantity=quantity)  # type: ignore[arg-type]
+                    BacktestConfig(quantity=quantity, cost_points_per_trade=2.0)  # type: ignore[arg-type]
 
     def test_config_rejects_invalid_trade_costs(self) -> None:
         for cost in (-0.25, float("nan"), float("inf")):
@@ -198,12 +199,12 @@ class ModelContractTests(unittest.TestCase):
             )
 
     def test_models_are_frozen_and_keyword_only(self) -> None:
-        config = BacktestConfig(quantity=1)
+        config = BacktestConfig(quantity=1, cost_points_per_trade=2.0)
 
         with self.assertRaises(FrozenInstanceError):
             config.quantity = 2  # type: ignore[misc]
         with self.assertRaises(TypeError):
-            BacktestConfig(1)  # type: ignore[misc]
+            BacktestConfig(1, 2.0)  # type: ignore[misc]
 
     def test_simple_strategy_satisfies_the_structural_contract(self) -> None:
         strategy: Strategy = HoldStrategy()

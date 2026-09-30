@@ -227,19 +227,21 @@ class EngineTests(unittest.TestCase):
 
     def test_empty_bars_raise_value_error(self):
         with self.assertRaises(ValueError):
-            run_backtest([], ScriptedStrategy(()), BacktestConfig(quantity=1))
+            run_backtest([], ScriptedStrategy(()), BacktestConfig(quantity=1, cost_points_per_trade=2.0))
 
     def test_invalid_strategy_outputs_raise_type_error(self):
         for output in ('BUY', None, 1):
             with self.subTest(output=output):
                 strategy = ScriptedStrategy((output,))
                 with self.assertRaises(TypeError):
-                    run_backtest(make_bars(19000), strategy, BacktestConfig(quantity=1))
+                    run_backtest(make_bars(19000), strategy,
+                        BacktestConfig(quantity=1, cost_points_per_trade=2.0))
+                self.assertEqual(len(strategy.evaluations), 1)
 
     def test_prior_bars_never_include_current_or_future_bars(self):
         bars = make_bars(19000, 19001, 19002, 19003)
         strategy = ScriptedStrategy((Signal.HOLD,) * len(bars))
-        run_backtest(bars, strategy, BacktestConfig(quantity=1))
+        run_backtest(bars, strategy, BacktestConfig(quantity=1, cost_points_per_trade=2.0))
         for index, (current, prior) in enumerate(strategy.evaluations):
             with self.subTest(index=index):
                 self.assertIs(current, bars[index])
@@ -253,7 +255,7 @@ class EngineTests(unittest.TestCase):
     def test_retained_prior_bar_views_do_not_grow_after_later_bars(self):
         bars = make_bars(19000, 19001, 19002, 19003)
         strategy = ScriptedStrategy((Signal.HOLD,) * len(bars))
-        run_backtest(bars, strategy, BacktestConfig(quantity=1))
+        run_backtest(bars, strategy, BacktestConfig(quantity=1, cost_points_per_trade=2.0))
         early_prior = strategy.evaluations[1][1]
         self.assertEqual(len(early_prior), 1)
         self.assertEqual(tuple(early_prior), (bars[0],))
@@ -266,11 +268,12 @@ class EngineTests(unittest.TestCase):
                 raise RuntimeError('strategy failed')
 
         with self.assertRaisesRegex(RuntimeError, 'strategy failed'):
-            run_backtest(make_bars(19000), BrokenStrategy(), BacktestConfig(quantity=1))
+            run_backtest(make_bars(19000), BrokenStrategy(),
+                BacktestConfig(quantity=1, cost_points_per_trade=2.0))
 
     def test_repeated_runs_do_not_share_positions_trades_or_prior_bars(self):
         bars = make_bars(19000, 19003)
-        config = BacktestConfig(quantity=1)
+        config = BacktestConfig(quantity=1, cost_points_per_trade=2.0)
         first = ScriptedStrategy((Signal.BUY, Signal.EXIT))
         second = ScriptedStrategy((Signal.BUY, Signal.EXIT))
         first_trades = run_backtest(bars, first, config)
