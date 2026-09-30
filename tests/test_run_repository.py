@@ -64,7 +64,7 @@ class FakeCursor:
     def execute(self, query, params=None):
         if not self.conn.in_transaction:
             raise AssertionError('query executed outside transaction')
-        if self.conn.fail_update and 'UPDATE backtest_runs' in query:
+        if self.conn.fail_update and 'UPDATE public.backtest_runs' in query:
             raise RuntimeError('database rejected update')
         command = ('execute', query, params)
         self.conn.events.append(command)
@@ -114,7 +114,7 @@ class RunRepositoryTests(unittest.TestCase):
         self.assertEqual(conn.events[-1], 'commit')
         self.assertEqual(len(conn.committed), 1)
         _, sql, params = conn.committed[0]
-        self.assertIn('INSERT INTO backtest_runs', sql)
+        self.assertIn('INSERT INTO public.backtest_runs', sql)
         self.assertNotIn('dataset_sha256', sql)
         self.assertNotIn('engine_sha256', sql)
         self.assertEqual(params, (1001, 'sample.csv', 2, 0.25))
@@ -132,10 +132,11 @@ class RunRepositoryTests(unittest.TestCase):
         self.assertEqual(len(conn.committed), 2)
         batch, update = conn.committed
         self.assertEqual(batch[0], 'executemany')
-        self.assertIn('INSERT INTO trades', batch[1])
+        self.assertIn('INSERT INTO public.trades', batch[1])
         self.assertEqual(len(batch[2]), 1)
         self.assertEqual(batch[2][0][:4], (1000, 1, 'long', 1))
         self.assertEqual(update[0], 'execute')
+        self.assertIn('UPDATE public.backtest_runs', update[1])
         self.assertIn("status = 'completed'", update[1])
         self.assertIn('dataset_sha256 = %s, engine_sha256 = %s', update[1])
         self.assertEqual(update[2][:2], (dataset_hash, engine_hash))
@@ -168,8 +169,10 @@ class RunRepositoryTests(unittest.TestCase):
         self.assertEqual(len(statements), 3)
         self.assertEqual(statements[0][1],
             'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
-        self.assertIn('FROM backtest_runs AS r', statements[1][1])
-        self.assertIn('FROM trades WHERE run_id', statements[2][1])
+        self.assertIn('FROM public.backtest_runs AS r', statements[1][1])
+        self.assertIn('JOIN public.strategy_versions AS v', statements[1][1])
+        self.assertIn('JOIN public.strategies AS s', statements[1][1])
+        self.assertIn('FROM public.trades WHERE run_id', statements[2][1])
         self.assertEqual(statements[1][2], (1000,))
         self.assertEqual(statements[2][2], (1000,))
 
@@ -180,7 +183,7 @@ class RunRepositoryTests(unittest.TestCase):
 
         self.assertEqual(conn.events[-1], 'commit')
         self.assertEqual(len(conn.committed), 2)
-        self.assertFalse(any('FROM trades' in event[1] for event in conn.committed))
+        self.assertFalse(any('FROM public.trades' in event[1] for event in conn.committed))
 
     def test_get_run_rejects_an_existing_transaction(self):
         conn = FakeConnection()

@@ -88,6 +88,42 @@ class MainTests(unittest.TestCase):
             error_message='FileNotFoundError: missing CSV')
         complete_run.assert_not_called()
 
+    def test_ctrl_c_after_start_is_recorded_as_failed(self):
+        conn = object()
+        with patch.object(Main, 'get_strategy_version', return_value={}), \
+                patch.object(Main, 'start_run', return_value=1001), \
+                patch.object(Main, 'load_strategy', return_value=object()), \
+                patch.object(Main, 'load_nq_data_with_hash',
+                    side_effect=KeyboardInterrupt('cancelled')), \
+                patch.object(Main, 'fail_run') as fail_run, \
+                patch.object(Main, 'complete_run') as complete_run, \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(KeyboardInterrupt, 'cancelled'):
+                Main.run(conn, version_id=1000, quantity=1, cost_points=2.0)
+
+        fail_run.assert_called_once_with(conn, run_id=1001,
+            error_message='KeyboardInterrupt: cancelled')
+        complete_run.assert_not_called()
+
+    def test_system_exit_during_execution_is_recorded_as_failed(self):
+        conn = object()
+        with patch.object(Main, 'get_strategy_version', return_value={}), \
+                patch.object(Main, 'start_run', return_value=1001), \
+                patch.object(Main, 'load_strategy', return_value=object()), \
+                patch.object(Main, 'load_nq_data_with_hash', return_value=([], 'a' * 64)), \
+                patch.object(Main, 'sha256_engine', return_value='b' * 64), \
+                patch.object(Main, 'run_backtest', side_effect=SystemExit(7)), \
+                patch.object(Main, 'fail_run') as fail_run, \
+                patch.object(Main, 'complete_run') as complete_run, \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                Main.run(conn, version_id=1000, quantity=1, cost_points=2.0)
+
+        self.assertEqual(raised.exception.code, 7)
+        fail_run.assert_called_once_with(conn, run_id=1001,
+            error_message='SystemExit: 7')
+        complete_run.assert_not_called()
+
     def test_strategy_compilation_error_after_start_is_recorded(self):
         conn = object()
         with patch.object(Main, 'get_strategy_version', return_value={}), \

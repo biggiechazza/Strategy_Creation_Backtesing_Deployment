@@ -1,5 +1,5 @@
-CREATE TABLE trades (
-    run_id BIGINT NOT NULL REFERENCES backtest_runs (run_id) ON DELETE CASCADE,
+CREATE TABLE public.trades (
+    run_id BIGINT NOT NULL REFERENCES public.backtest_runs (run_id) ON DELETE CASCADE,
     trade_number INTEGER NOT NULL,
     direction TEXT NOT NULL,
     quantity SMALLINT NOT NULL,

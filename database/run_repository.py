@@ -12,7 +12,7 @@ def start_run(conn: psycopg.Connection, *, strategy_version_id: int,
         with conn.cursor() as cur:
             cur.execute(
                 '''
-                INSERT INTO backtest_runs (
+                INSERT INTO public.backtest_runs (
                     strategy_version_id, dataset_ref, quantity,
                     cost_points_per_trade
                 )
@@ -43,7 +43,7 @@ def complete_run(conn: psycopg.Connection, *, run_id: int, result: BacktestResul
         with conn.cursor() as cur:
             cur.executemany(
                 '''
-                INSERT INTO trades (
+                INSERT INTO public.trades (
                     run_id, trade_number, direction, quantity,
                     entry_timestamp, entry_utc_offset, entry_price,
                     exit_timestamp, exit_utc_offset, exit_price,
@@ -65,7 +65,7 @@ def complete_run(conn: psycopg.Connection, *, run_id: int, result: BacktestResul
             )
             cur.execute(
                 '''
-                UPDATE backtest_runs SET
+                UPDATE public.backtest_runs SET
                     status = 'completed', finished_at = CURRENT_TIMESTAMP,
                     dataset_sha256 = %s, engine_sha256 = %s,
                     total_trades = %s, winning_trades = %s, losing_trades = %s,
@@ -92,7 +92,7 @@ def fail_run(conn: psycopg.Connection, *, run_id: int, error_message: str) -> No
         with conn.cursor() as cur:
             cur.execute(
                 '''
-                UPDATE backtest_runs SET
+                UPDATE public.backtest_runs SET
                     status = 'failed', finished_at = CURRENT_TIMESTAMP,
                     error_message = %s
                 WHERE run_id = %s AND status = 'running'
@@ -115,10 +115,10 @@ def get_run(conn: psycopg.Connection, *, run_id: int) -> dict | None:
                 '''
                 SELECT r.*, s.name AS strategy_name, v.version_number,
                        v.entrypoint_name, v.source_code
-                FROM backtest_runs AS r
-                JOIN strategy_versions AS v
+                FROM public.backtest_runs AS r
+                JOIN public.strategy_versions AS v
                   ON v.strategy_version_id = r.strategy_version_id
-                JOIN strategies AS s ON s.strategy_id = v.strategy_id
+                JOIN public.strategies AS s ON s.strategy_id = v.strategy_id
                 WHERE r.run_id = %s
                 ''',
                 (run_id,),
@@ -127,7 +127,7 @@ def get_run(conn: psycopg.Connection, *, run_id: int) -> dict | None:
             if run is None:
                 return None
             cur.execute(
-                'SELECT * FROM trades WHERE run_id = %s ORDER BY trade_number',
+                'SELECT * FROM public.trades WHERE run_id = %s ORDER BY trade_number',
                 (run_id,),
             )
             run['trades'] = cur.fetchall()

@@ -35,8 +35,8 @@ def run(conn, *, version_id: int, quantity: int, cost_points: float) -> int:
     version = get_strategy_version(conn, version_id=version_id)
     run_id = start_run(conn, strategy_version_id=version_id, config=config,
         dataset_ref=DATASET.name)
-    print(f'Started run {run_id} (saved as running).')
     try:
+        print(f'Started run {run_id} (saved as running).')
         strategy = load_strategy(version)
         bars, dataset_hash = load_nq_data_with_hash(DATASET)
         engine_hash = sha256_engine()
@@ -44,7 +44,7 @@ def run(conn, *, version_id: int, quantity: int, cost_points: float) -> int:
         result = calculate_results(trades)
         complete_run(conn, run_id=run_id, result=result,
             dataset_sha256=dataset_hash, engine_sha256=engine_hash)
-    except Exception as error:
+    except BaseException as error:
         try:
             fail_run(conn, run_id=run_id,
                 error_message=f'{type(error).__name__}: {error}'[:1000])

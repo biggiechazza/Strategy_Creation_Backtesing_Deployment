@@ -1,6 +1,6 @@
-CREATE TABLE strategy_versions (
+CREATE TABLE public.strategy_versions (
     strategy_version_id BIGINT GENERATED ALWAYS AS IDENTITY (START WITH 1000) PRIMARY KEY,
-    strategy_id BIGINT NOT NULL REFERENCES strategies (strategy_id) ON DELETE RESTRICT,
+    strategy_id BIGINT NOT NULL REFERENCES public.strategies (strategy_id) ON DELETE RESTRICT,
     version_number INTEGER NOT NULL,
     entrypoint_name TEXT,
     source_code TEXT NOT NULL,
@@ -12,7 +12,7 @@ CREATE TABLE strategy_versions (
     CONSTRAINT strategy_versions_strategy_number_unique UNIQUE (strategy_id, version_number)
 );
 
-CREATE FUNCTION prevent_strategy_version_update()
+CREATE FUNCTION public.prevent_strategy_version_update()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -32,5 +32,5 @@ END;
 $$;
 
 CREATE TRIGGER strategy_versions_no_update
-BEFORE UPDATE ON strategy_versions
-FOR EACH ROW EXECUTE FUNCTION prevent_strategy_version_update();
+BEFORE UPDATE ON public.strategy_versions
+FOR EACH ROW EXECUTE FUNCTION public.prevent_strategy_version_update();

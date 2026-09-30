@@ -1,7 +1,7 @@
-CREATE TABLE backtest_runs (
+CREATE TABLE public.backtest_runs (
     run_id BIGINT GENERATED ALWAYS AS IDENTITY (START WITH 1000) PRIMARY KEY,
     strategy_version_id BIGINT NOT NULL
-        REFERENCES strategy_versions (strategy_version_id) ON DELETE RESTRICT,
+        REFERENCES public.strategy_versions (strategy_version_id) ON DELETE RESTRICT,
     status TEXT NOT NULL DEFAULT 'running',
     started_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     finished_at TIMESTAMPTZ,
@@ -84,4 +84,4 @@ CREATE TABLE backtest_runs (
 );
 
 CREATE INDEX backtest_runs_strategy_version_run_idx
-    ON backtest_runs (strategy_version_id, run_id);
+    ON public.backtest_runs (strategy_version_id, run_id);

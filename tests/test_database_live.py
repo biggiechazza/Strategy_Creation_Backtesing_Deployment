@@ -16,6 +16,7 @@ from app.metrics import calculate_results
 from app.models import BacktestConfig, PositionState, Trade
 from database.connection import connect_database
 from database.run_repository import complete_run, fail_run, get_run, start_run
+from database.strategy_repository import get_strategy_version
 
 Database_name = 'strategy_app_test'
 Password_variable = 'STRATEGY_APP_TEST_DB_PASSWORD'
@@ -208,6 +209,26 @@ class LiveDatabaseTests(unittest.TestCase):
         self.assertEqual(failed['error_message'], 'Save failed')
         self.assertTrue(all(failed[field] is None for field in Summary_fields))
         self.assertEqual(failed['trades'], [])
+
+    def test_repositories_use_public_when_search_path_excludes_it(self):
+        with self.conn.cursor() as cur:
+            cur.execute('SET search_path TO pg_catalog')
+            cur.execute('SELECT current_schema()')
+            self.assertEqual(cur.fetchone()[0], 'pg_catalog')
+
+        version = get_strategy_version(self.conn, version_id=self.version_id)
+        self.assertEqual(version['strategy_version_id'], self.version_id)
+        config = BacktestConfig(quantity=1, cost_points_per_trade=2.0)
+        run_id = self.start_owned_run(self.conn, strategy_version_id=self.version_id,
+            config=config, dataset_ref='sample.csv')
+        complete_run(self.conn, run_id=run_id, result=calculate_results(self.make_trades()),
+            dataset_sha256='a' * 64, engine_sha256='b' * 64)
+        self.assertEqual(get_run(self.conn, run_id=run_id)['status'], 'completed')
+
+        failed_id = self.start_owned_run(self.conn, strategy_version_id=self.version_id,
+            config=config, dataset_ref='sample.csv')
+        fail_run(self.conn, run_id=failed_id, error_message='test failure')
+        self.assertEqual(get_run(self.conn, run_id=failed_id)['status'], 'failed')
 
 
 if __name__ == '__main__':
