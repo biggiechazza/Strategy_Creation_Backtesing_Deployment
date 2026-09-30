@@ -4,14 +4,11 @@ CREATE TABLE strategy_versions (
     version_number INTEGER NOT NULL,
     entrypoint_name TEXT,
     source_code TEXT NOT NULL,
-    source_sha256 VARCHAR(64),
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT strategy_versions_number_positive CHECK (version_number >= 1),
     CONSTRAINT strategy_versions_entrypoint_not_blank
         CHECK (entrypoint_name IS NULL OR btrim(entrypoint_name) <> ''),
     CONSTRAINT strategy_versions_source_not_blank CHECK (btrim(source_code) <> ''),
-    CONSTRAINT strategy_versions_source_hash_format
-        CHECK (source_sha256 IS NULL OR source_sha256 ~ '^[0-9a-f]{64}$'),
     CONSTRAINT strategy_versions_strategy_number_unique UNIQUE (strategy_id, version_number)
 );
 
@@ -26,8 +23,6 @@ BEGIN
        OR NEW.source_code IS DISTINCT FROM OLD.source_code
        OR (OLD.entrypoint_name IS NOT NULL
            AND NEW.entrypoint_name IS DISTINCT FROM OLD.entrypoint_name)
-       OR (OLD.source_sha256 IS NOT NULL
-           AND NEW.source_sha256 IS DISTINCT FROM OLD.source_sha256)
        OR (OLD.created_at IS NOT NULL
            AND NEW.created_at IS DISTINCT FROM OLD.created_at) THEN
         RAISE EXCEPTION 'strategy version identity and populated fields are immutable';
