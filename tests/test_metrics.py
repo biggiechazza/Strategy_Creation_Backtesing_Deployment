@@ -119,6 +119,40 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(result.total_net_pnl, 20)
         self.assertEqual(result.average_trade, 20)
 
+    def test_rejects_nonfinite_trade_net_pnl(self):
+        for net_pnl in (float('nan'), float('inf'), float('-inf')):
+            with self.subTest(net_pnl=net_pnl):
+                with self.assertRaisesRegex(ValueError, 'Trade net P&L must be finite'):
+                    calculate_results(make_trades(net_pnl))
+
+    def test_rejects_cumulative_overflow_from_finite_losses(self):
+        with self.assertRaisesRegex(ValueError, 'Cumulative net P&L must be finite'):
+            calculate_results(make_trades(-1.6e308, -1.6e308))
+
+    def test_rejects_gross_profit_overflow_with_finite_equity(self):
+        with self.assertRaisesRegex(ValueError, 'Gross profit must be finite'):
+            calculate_results(make_trades(9e307, -9e307, 9e307))
+
+    def test_rejects_gross_loss_overflow_with_finite_equity(self):
+        with self.assertRaisesRegex(ValueError, 'Gross loss must be finite'):
+            calculate_results(make_trades(9e307, -9e307, 8e307, -9e307))
+
+    def test_rejects_drawdown_overflow_with_finite_equity(self):
+        with self.assertRaisesRegex(ValueError, 'Drawdown must be finite'):
+            calculate_results(make_trades(1e308, -1e308, -1e308))
+
+    def test_rejects_profit_factor_overflow(self):
+        with self.assertRaisesRegex(ValueError, 'Profit factor must be finite'):
+            calculate_results(make_trades(1e308, -1e-307))
+
+    def test_large_finite_metrics_remain_valid(self):
+        single_loss = calculate_results(make_trades(-1.6e308))
+        self.assertEqual(single_loss.total_net_pnl, -1.6e308)
+        self.assertEqual(single_loss.max_drawdown, 1.6e308)
+        result = calculate_results(make_trades(1e300, -5e299))
+        self.assertEqual((result.total_net_pnl, result.average_trade,
+            result.profit_factor, result.max_drawdown), (5e299, 2.5e299, 2, 5e299))
+
 
 if __name__ == '__main__':
     unittest.main()

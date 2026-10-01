@@ -1,0 +1,7 @@
+Known issues and limitations
+
+1. Interrupted run recovery: A hard process kill can leave a run marked running. Automatic recovery still needs a policy.
+
+2. Provenance hash scope: The engine hash intentionally covers only data_loader.py, engine.py, metrics.py, and models.py. It is not a fingerprint of all executable code or dependencies.
+
+3. CSV structure validation: The loader checks required columns, but does not explicitly reject duplicate column names or rows whose width differs from the header. A duplicate Close header can overwrite an earlier value before price validation. This remains an open issue.

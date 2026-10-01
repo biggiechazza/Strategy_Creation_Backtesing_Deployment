@@ -1,6 +1,6 @@
 # Execute strategy signals against completed NQ bars and return completed trades.
 from __future__ import annotations
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from app.models import NQ_POINT_VALUE, BacktestConfig, Bar, Position, PositionState, Signal, Strategy, Trade
 
 class _PriorBars(Sequence[Bar]):
@@ -46,15 +46,27 @@ def _close_position(position: Position, bar: Bar, config: BacktestConfig) -> Tra
 
 # PRIMARY FUNCTION
 def run_backtest(bars: Sequence[Bar], strategy: Strategy,
-    config: BacktestConfig) -> tuple[Trade, ...]:
-    '''Evaluate each completed bar, execute at its close, and return all trades.'''
+    config: BacktestConfig, *, strategy_factory: Callable[[], Strategy] | None = None) -> tuple[Trade, ...]:
+    '''Execute at bar closes; a contract change requires a fresh strategy from the factory.'''
 
     if not bars:
         raise ValueError('Backtest requires at least one Bar')
     trades = []
     prior_bars = []
+    used_strategies = [strategy]
     position = None
     for bar in bars:
+        if prior_bars and bar.contract != prior_bars[-1].contract:
+            if strategy_factory is None:
+                raise ValueError('Contract changes require strategy_factory to create a fresh strategy')
+            next_strategy = strategy_factory()
+            if (any(next_strategy is previous for previous in used_strategies)
+                    or not callable(getattr(next_strategy, 'evaluate', None))):
+                raise ValueError('strategy_factory must return a fresh strategy with evaluate()')
+            strategy = next_strategy
+            used_strategies.append(strategy)
+            position = None # A trade spanning different contracts is excluded entirely.
+            prior_bars = [] # Retained views of the previous contract keep their original bars.
         signal = strategy.evaluate(bar, _PriorBars(prior_bars))
         if not isinstance(signal, Signal):
             raise TypeError(f'Strategy returned an invalid Signal: {signal!r}')

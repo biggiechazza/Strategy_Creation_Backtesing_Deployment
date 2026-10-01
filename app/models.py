@@ -50,12 +50,16 @@ def _validate_open_direction(direction: PositionState) -> None:
         raise ValueError('an open position or completed trade cannot be FLAT')
 
 def _validate_cost_points(cost_points: float) -> None:
-    """Reject costs that cannot represent a finite, non-negative point charge."""
+    '''Require a non-negative cost with a finite NQ dollar conversion.'''
 
     if isinstance(cost_points, bool) or not isinstance(cost_points, (int, float)):
         raise TypeError('cost_points_per_trade must be a real number')
-    if not isfinite(cost_points) or cost_points < 0:
-        raise ValueError('cost_points_per_trade must be finite and non-negative')
+    try:
+        valid = isfinite(cost_points) and cost_points >= 0 and isfinite(cost_points * NQ_POINT_VALUE)
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise ValueError('cost_points_per_trade must be finite, non-negative, and produce a finite dollar cost')
 
 @dataclass(frozen=True, kw_only=True)
 class Bar:
@@ -162,9 +166,10 @@ class Strategy(Protocol):
     """Structural interface implemented by a sequential trading strategy.
 
     The engine calls ``evaluate`` only after ``current_bar`` is complete.
-    ``prior_bars`` must contain bars evaluated before the current bar and must not
-    contain the current bar or any future bar. A strategy returns intent only; it
-    never mutates engine position, trade, or account state.
+    ``prior_bars`` contains earlier bars from the current contract segment only,
+    excluding the current bar and future bars. Each contract change starts a
+    fresh strategy instance and an empty history. A strategy returns intent only;
+    it never mutates engine position, trade, or account state.
     """
 # IMPORTS AND NL STRATS TO BE DEFINED LATER VIA FUTURE AGENT
     def evaluate(

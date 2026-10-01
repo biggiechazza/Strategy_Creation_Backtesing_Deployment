@@ -143,6 +143,12 @@ class ModelContractTests(unittest.TestCase):
                         cost_points_per_trade=cost,
                     )
 
+    def test_config_rejects_costs_that_overflow_dollars(self):
+        for cost in (1e308, 10**400):
+            with self.subTest(cost=cost):
+                with self.assertRaisesRegex(ValueError, 'finite dollar cost'):
+                    BacktestConfig(quantity=1, cost_points_per_trade=cost)
+
     def test_position_and_trade_cannot_be_flat(self) -> None:
         with self.assertRaises(ValueError):
             Position(

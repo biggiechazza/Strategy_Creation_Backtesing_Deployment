@@ -2,6 +2,7 @@
 from __future__ import annotations
 import unittest
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from app.engine import run_backtest
 from app.models import BacktestConfig, Bar, PositionState, Signal, Trade
@@ -193,6 +194,145 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(trades[0].gross_pnl, 300)
         self.assertEqual(trades[0].cost_dollars, 30)
         self.assertEqual(trades[0].net_pnl, 270)
+
+    def test_contract_change_discards_open_long_and_short(self):
+        bars = make_bars(19607.75, 19855.75)
+        bars[1] = replace(bars[1], contract='NQU4')
+        for entry in (Signal.BUY, Signal.SELL):
+            for action in (Signal.EXIT, Signal.HOLD):
+                with self.subTest(entry=entry, action=action):
+                    strategy = ScriptedStrategy((entry,))
+                    next_strategy = ScriptedStrategy((action,))
+                    trades = run_backtest(bars, strategy,
+                        BacktestConfig(quantity=1, cost_points_per_trade=2.0),
+                        strategy_factory=lambda: next_strategy)
+                    self.assertEqual(trades, ())
+                    self.assertEqual(len(strategy.evaluations), 1)
+                    self.assertEqual(tuple(next_strategy.evaluations[0][1]), ())
+
+    def test_contract_change_preserves_closed_trades_and_allows_new_entry(self):
+        bars = make_bars(19000, 19003, 19005, 19250, 19253)
+        bars[3:] = [replace(bar, contract='NQU4') for bar in bars[3:]]
+        for entry, direction, net_pnl in ((Signal.BUY, PositionState.LONG, 20),
+                (Signal.SELL, PositionState.SHORT, -100)):
+            with self.subTest(entry=entry):
+                strategy = ScriptedStrategy((Signal.BUY, Signal.EXIT, Signal.BUY))
+                trades = run_backtest(bars, strategy,
+                    BacktestConfig(quantity=1, cost_points_per_trade=2.0),
+                    strategy_factory=lambda: ScriptedStrategy((entry, Signal.EXIT)))
+                self.assertEqual(len(trades), 2)
+                self.assertEqual((trades[0].entry_timestamp, trades[0].exit_timestamp),
+                    (bars[0].timestamp, bars[1].timestamp))
+                self.assertEqual(trades[0].net_pnl, 20)
+                self.assertEqual((trades[1].entry_timestamp, trades[1].exit_timestamp),
+                    (bars[3].timestamp, bars[4].timestamp))
+                self.assertIs(trades[1].direction, direction)
+                self.assertEqual((trades[1].entry_price, trades[1].cost_dollars,
+                    trades[1].net_pnl), (19250, 40, net_pnl))
+
+    def test_contract_change_while_flat_allows_new_trade(self):
+        bars = make_bars(19000, 19250, 19253)
+        bars[1:] = [replace(bar, contract='NQU4') for bar in bars[1:]]
+        strategy = ScriptedStrategy((Signal.HOLD,))
+        trades = run_backtest(bars, strategy,
+            BacktestConfig(quantity=1, cost_points_per_trade=2.0),
+            strategy_factory=lambda: ScriptedStrategy((Signal.BUY, Signal.EXIT)))
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0].entry_timestamp, bars[1].timestamp)
+        self.assertEqual(trades[0].net_pnl, 20)
+
+    def test_contract_change_resets_stateful_strategy(self):
+        class StatefulStrategy:
+            def __init__(self, target: float):
+                self.target = target
+                self.entry_price = None
+
+            def evaluate(self, current_bar, prior_bars):
+                if self.entry_price is None:
+                    self.entry_price = current_bar.close
+                    return Signal.BUY
+                if current_bar.close - self.entry_price >= self.target:
+                    self.entry_price = None
+                    return Signal.EXIT
+                return Signal.HOLD
+
+        bars = make_bars(19000, 19001, 19250, 19251, 19253)
+        bars[2:] = [replace(bar, contract='NQU4') for bar in bars[2:]]
+        trades = run_backtest(bars, StatefulStrategy(target=3),
+            BacktestConfig(quantity=1, cost_points_per_trade=2.0),
+            strategy_factory=lambda: StatefulStrategy(target=3))
+        self.assertEqual(len(trades), 1)
+        self.assertEqual((trades[0].entry_timestamp, trades[0].exit_timestamp),
+            (bars[2].timestamp, bars[4].timestamp))
+        self.assertEqual(trades[0].net_pnl, 20)
+
+    def test_rollover_gap_cannot_trigger_momentum_and_old_views_stay_intact(self):
+        class MomentumStrategy:
+            def __init__(self):
+                self.evaluations = []
+
+            def evaluate(self, current_bar, prior_bars):
+                self.evaluations.append((current_bar, prior_bars))
+                if prior_bars and current_bar.close - prior_bars[-1].close >= 100:
+                    return Signal.BUY
+                return Signal.HOLD
+
+        bars = make_bars(19606.75, 19607.75, 19855.75, 19856.75, 20104.75, 20105.75)
+        bars[2:4] = [replace(bar, contract='NQU4') for bar in bars[2:4]]
+        strategies = [MomentumStrategy()]
+
+        def fresh_strategy():
+            strategies.append(MomentumStrategy())
+            return strategies[-1]
+
+        trades = run_backtest(bars, strategies[0],
+            BacktestConfig(quantity=1, cost_points_per_trade=2.0),
+            strategy_factory=fresh_strategy)
+        self.assertEqual(trades, ())
+        self.assertEqual(len(strategies), 3)
+        for index, strategy in enumerate(strategies):
+            first, second = strategy.evaluations
+            self.assertIs(first[0], bars[index * 2])
+            self.assertEqual(tuple(first[1]), ())
+            self.assertEqual(tuple(second[1]), (first[0],))
+            self.assertTrue(all(bar.contract == second[0].contract for bar in second[1]))
+
+    def test_contract_change_requires_factory_before_evaluating_new_bar(self):
+        bars = make_bars(19000, 19250)
+        bars[1] = replace(bars[1], contract='NQU4')
+        for signal in (Signal.BUY, Signal.HOLD):
+            with self.subTest(signal=signal):
+                strategy = ScriptedStrategy((signal, Signal.HOLD))
+                with self.assertRaisesRegex(ValueError, 'Contract changes require strategy_factory'):
+                    run_backtest(bars, strategy,
+                        BacktestConfig(quantity=1, cost_points_per_trade=2.0))
+                self.assertEqual(len(strategy.evaluations), 1)
+
+    def test_contract_change_rejects_reused_or_invalid_strategy(self):
+        bars = make_bars(19000, 19250)
+        bars[1] = replace(bars[1], contract='NQU4')
+        for reuse in (True, False):
+            with self.subTest(reuse=reuse):
+                strategy = ScriptedStrategy((Signal.HOLD, Signal.HOLD))
+                replacement = strategy if reuse else object()
+                with self.assertRaisesRegex(ValueError, 'fresh strategy with evaluate'):
+                    run_backtest(bars, strategy,
+                        BacktestConfig(quantity=1, cost_points_per_trade=2.0),
+                        strategy_factory=lambda: replacement)
+
+    def test_contract_change_rejects_any_previously_used_strategy(self):
+        bars = make_bars(19000, 19250, 19500)
+        bars[1] = replace(bars[1], contract='NQU4')
+        bars[2] = replace(bars[2], contract='NQZ4')
+        first = ScriptedStrategy((Signal.HOLD, Signal.HOLD))
+        second = ScriptedStrategy((Signal.HOLD,))
+        replacements = iter((second, first))
+        with self.assertRaisesRegex(ValueError, 'fresh strategy with evaluate'):
+            run_backtest(bars, first,
+                BacktestConfig(quantity=1, cost_points_per_trade=2.0),
+                strategy_factory=lambda: next(replacements))
+        self.assertEqual(len(first.evaluations), 1)
+        self.assertEqual(len(second.evaluations), 1)
 
     def test_open_long_force_closes_at_final_bar_close(self):
         bars, _, trades = self.run_signals((19000, 19003),

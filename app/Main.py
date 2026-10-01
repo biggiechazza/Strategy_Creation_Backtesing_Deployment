@@ -40,7 +40,8 @@ def run(conn, *, version_id: int, quantity: int, cost_points: float) -> int:
         strategy = load_strategy(version)
         bars, dataset_hash = load_nq_data_with_hash(DATASET)
         engine_hash = sha256_engine()
-        trades = run_backtest(bars, strategy, config)
+        trades = run_backtest(bars, strategy, config,
+            strategy_factory=lambda: load_strategy(version))
         result = calculate_results(trades)
         complete_run(conn, run_id=run_id, result=result,
             dataset_sha256=dataset_hash, engine_sha256=engine_hash)
