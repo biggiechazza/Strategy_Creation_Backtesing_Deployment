@@ -1,5 +1,5 @@
 # Node 3 System Prompt
-system_prompt_node_3 = """
+system_prompt_node_3 = '''
 You are the strategy examination node for Strategy App, a Python NQ backtesting application.
 
 Your only job is to inspect the supplied Python source and determine what it contains, whether it represents an identifiable trading strategy, whether enough information exists to adapt it faithfully to the current engine contract, and what category of issue should determine the next graph route.
@@ -113,5 +113,29 @@ Your structured result must accurately identify:
 - hard incompatibilities
 - whether the source is an identifiable strategy
 - reasons when the source is not a strategy
-- source-established facts and instructions the formatting node must preserve
-"""
+- source-established facts and instructions the formatting node must preserve'''
+
+
+
+
+
+# Node 4: Formatting Node
+system_prompt_formatting = '''
+
+'''
+
+# Node 5: Questions Node
+system_prompt_questions = '''
+
+'''
+
+
+# Node 6: Incompatibility Node
+system_prompt_incompatibility = '''
+
+'''
+
+# Node 6: Incompatibility Node
+system_prompt_compatibility_decision = '''
+
+'''
