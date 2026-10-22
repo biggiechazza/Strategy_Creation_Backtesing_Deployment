@@ -1,11 +1,10 @@
 
 from dotenv import load_dotenv
-import ast
 import uuid
 from pathlib import Path
 from typing import Literal, TypedDict
-from System_Prompt import system_prompt_node_3, system_prompt_formatting, system_prompt_incompatibility, system_prompt_compatibility_decision, system_prompt_questions
-
+from .System_Prompt import (system_prompt_node_3, system_prompt_formatting, system_prompt_incompatibility, system_prompt_compatibility_decision, system_prompt_questions)
+from .Validation_Node import validation_node
 
 from pydantic import BaseModel, Field
 
