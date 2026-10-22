@@ -141,15 +141,12 @@ def validation_node(state):
             evaluate_method = next(
                 (node for node in entrypoint_class.body
                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                 and node.name == 'evaluate'),
-                None)
+                 and node.name == 'evaluate'), None)
 
             if evaluate_method is None:
-                checks_skipped.append({
-            'check': 'evaluate_signature',
-            'reason': (
-            'No directly declared evaluate() method found. '
-            'Runtime verification must check inherited or dynamic methods.')})
+                checks.append('evaluate_signature')
+                validation_errors.append({'code': 'MISSING_EVALUATE','explanation': 'No directly declared evaluate() method found.' 'Runtime verification must check inherited or dynamic methods.', 
+                                          'location': f'Line {entrypoint_class.lineo}'})
 
             else:
                 checks.append('evaluate_signature')
