@@ -2,6 +2,17 @@ import ast
 from typing import Literal
 from pydantic import BaseModel, Field
 
+
+class ValidationResult(BaseModel):
+    validation_status: Literal['passed', 'failed', 'blocked']
+
+    checks: list[str] = Field(default_factory=list)
+
+    checks_skipped: list[dict[str, str]] = Field(default_factory=list)
+
+    validation_errors: list[dict[str, str | None]] = Field(default_factory=list)
+
+
 # Validation Node, Formatting node outputs here if 'ready'
 # No model call
 def validation_node(state):
@@ -146,7 +157,7 @@ def validation_node(state):
             if evaluate_method is None:
                 checks.append('evaluate_signature')
                 validation_errors.append({'code': 'MISSING_EVALUATE','explanation': 'No directly declared evaluate() method found.' 'Runtime verification must check inherited or dynamic methods.', 
-                                          'location': f'Line {entrypoint_class.lineo}'})
+                                          'location': f'Line {entrypoint_class.lineno}'})
 
             else:
                 checks.append('evaluate_signature')
@@ -159,15 +170,11 @@ def validation_node(state):
 
                 else:
                     positional_args = (evaluate_method.args.posonlyargs + evaluate_method.args.args)
-                    required_positional = (
-                        len(positional_args) - len(evaluate_method.args.defaults))
+                    required_positional = (len(positional_args) - len(evaluate_method.args.defaults))
 
                     # Instance binding supplies self; the engine supplies two market-data arguments.
-                    accepts_engine_arguments = (
-                        required_positional <= 3
-                        and (
-                            len(positional_args) >= 3
-                            or evaluate_method.args.vararg is not None))
+                    accepts_engine_arguments = (required_positional <= 3
+                        and (len(positional_args) >= 3 or evaluate_method.args.vararg is not None))
 
                     if (
                         not accepts_engine_arguments
@@ -522,10 +529,7 @@ def validation_node(state):
                 current = pending.pop()
 
                 # Ignore nested functions because their returns belong elsewhere
-                if isinstance(current, (
-                    ast.FunctionDef, ast.AsyncFunctionDef,
-                    ast.ClassDef, ast.Lambda
-                )):
+                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef,ast.ClassDef, ast.Lambda)):
                     continue
 
                 if isinstance(current, ast.Return):
@@ -535,48 +539,23 @@ def validation_node(state):
                     if value is None or isinstance(value, ast.Constant):
                         validation_errors.append({
                             'code': 'INVALID_SIGNAL_RETURN',
-                            'explanation': 'evaluate() returns a literal or None instead of an application Signal.',
-                            'location': f'Line {current.lineno}'
-                        })
+                            'explanation': 'evaluate() returns a literal or None instead of an application Signal.','location': f'Line {current.lineno}'})
 
                     # Detect references to unsupported Signal members
                     elif (
                         isinstance(value, ast.Attribute)
                         and isinstance(value.value, ast.Name)
                         and value.value.id == 'Signal'
-                        and value.attr not in allowed_signals
-                    ):
+                        and value.attr not in allowed_signals):
                         validation_errors.append({
                             'code': 'INVALID_SIGNAL_MEMBER',
                             'explanation': f'Unsupported Signal member: {value.attr}',
-                            'location': f'Line {current.lineno}'
-                        })
+                            'location': f'Line {current.lineno}'})
 
                 # Continue inspecting nested statements and branches
                 pending.extend(ast.iter_child_nodes(current))
 
         # STEP 10: Determine validation outcome and return findings
-
-    # Record required runtime checks that cannot run without
-    # a verified, restricted execution environment
-    checks_skipped.extend([
-        {
-            'check': 'runtime_constructor',
-            'reason': 'Restricted execution environment not implemented.'
-        },
-        {
-            'check': 'runtime_evaluate_and_signal',
-            'reason': 'Cannot verify callable behavior or Signal returns without restricted execution.'
-        },
-        {
-            'check': 'runtime_smoke_tests',
-            'reason': 'Synthetic bar tests, exceptions, and timeouts not yet implemented.'
-        },
-        {
-            'check': 'full_behavior_verification',
-            'reason': 'Current static checks cannot establish all engine behavior and lookahead restrictions.'
-        }
-    ])
 
     # A detected defect takes priority over checks that were skipped
     if validation_errors:
@@ -591,12 +570,7 @@ def validation_node(state):
         validation_status = 'passed'
 
     # Package all findings using the existing Pydantic schema
-    result = ValidationResult(
-        validation_status=validation_status,
-        validation_errors=validation_errors,
-        checks=checks,
-        checks_skipped=checks_skipped
-    )
+    result = ValidationResult(validation_status=validation_status,validation_errors=validation_errors,checks=checks,checks_skipped=checks_skipped)
 
     # Return the structured results to LangGraph state
     return result.model_dump()

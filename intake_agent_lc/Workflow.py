@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal, TypedDict
 from .System_Prompt import (system_prompt_node_3, system_prompt_formatting, system_prompt_incompatibility, system_prompt_compatibility_decision, system_prompt_questions)
 from .Validation_Node import validation_node
-
+import ast
 from pydantic import BaseModel, Field
 
 from langchain.chat_models import init_chat_model
@@ -146,17 +146,6 @@ class CompatibilityDecision(BaseModel):
         'needs_response'] = Field(description='Whether the user explicitly approved the proposed compatibility changes.')
 
 
-
-class ValidationResult(BaseModel):
-    validation_status: Literal['passed', 'failed', 'blocked']
-
-    checks: list[str] = Field(default_factory=list)
-
-    checks_skipped: list[dict[str, str]] = Field(default_factory=list)
-
-    validation_errors: list[dict[str, str | None]] = Field(default_factory=list)
-
-
 # Node functions
 
 # Node 1
@@ -240,6 +229,8 @@ def examine_file_node(state):
     if result.status == 'not_strategy':
         print(result.incompatibilities)
         raise ValueError('The uploaded file contains no identifiable trading strategy.')
+    elif result.status == 'ready_for_validation' and result.questions or result.clarifiable_issues or result.incompatibilities == '':
+        raise ValueError('"ready" status is not allowed while questions and/or incompatibilities exist.')
 
     # Model returns this exact output
     return {
@@ -262,7 +253,7 @@ def route_examination(state):
 
     # Temporary for agent evals
     else:
-        print('Unexpected examination status')
+        print('Unexpected examination status, examine node.')
 
 
 
@@ -356,8 +347,7 @@ def questions_node(state):
     previous_answers = state.get('user_answers', [])
 
     # Evaluate all clarification requirements and previous answers
-    result = QuestionsResult.model_validate(
-        evaluate_questions(
+    result = QuestionsResult.model_validate(evaluate_questions(
             state.get('source_code'),
             state.get('formatting_notes', []),
             state.get('questions', []),
@@ -519,6 +509,8 @@ def route_incompatibility(state):
         return END
 
     raise ValueError(f'Unexpected incompatibility status: {status}')
+
+
 
 
 
