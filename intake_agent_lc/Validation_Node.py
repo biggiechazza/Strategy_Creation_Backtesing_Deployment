@@ -167,7 +167,7 @@ def validation_node(state):
                         'code': 'ASYNC_EVALUATE',
                         'explanation': 'evaluate() must be synchronous.',
                         'location': f'Line {evaluate_method.lineno}'})
-
+                    
                 else:
                     positional_args = (evaluate_method.args.posonlyargs + evaluate_method.args.args)
                     required_positional = (len(positional_args) - len(evaluate_method.args.defaults))

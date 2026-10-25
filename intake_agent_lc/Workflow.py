@@ -229,16 +229,18 @@ def examine_file_node(state):
     if result.status == 'not_strategy':
         print(result.incompatibilities)
         raise ValueError('The uploaded file contains no identifiable trading strategy.')
-    elif result.status == 'ready_for_validation' and result.questions or result.clarifiable_issues or result.incompatibilities == '':
-        raise ValueError('"ready" status is not allowed while questions and/or incompatibilities exist.')
 
+    # Dont let statuses contradict themselves
+    elif result.status == 'ready' and result.questions or result.clarifiable_issues or result.incompatibilities:
+        raise ValueError('"ready" status is not allowed while questions and/or incompatibilities exist.')
+    else:
     # Model returns this exact output
-    return {
-        'examination_status': result.status,
-        'questions': result.questions,
-        'clarifiable_issues': result.clarifiable_issues,
-        'incompatibilities': result.incompatibilities,
-        'formatting_notes': result.formatting_notes,}
+        return {
+            'examination_status': result.status,
+            'questions': result.questions,
+            'clarifiable_issues': result.clarifiable_issues,
+            'incompatibilities': result.incompatibilities,
+            'formatting_notes': result.formatting_notes,}
 
 
 # Grab 'examination_status' from the models output and tell the graph which node to use initially.
@@ -276,13 +278,17 @@ def code_formatting_node(state):
     result = model.with_structured_output(FormattingResult).invoke([SystemMessage(content = system_prompt_formatting),
         HumanMessage(content = f'''Original strategy source:{source_code}Examination notes:{formatting_notes}User clarification answers:{user_answers}User-approved compatibility changes:{approved_changes}''')])
 
-    return {
-        'format_status': result.status,
-        'formatted_source': result.formatted_source,
-        'entrypoint_name': result.entrypoint_name,
-        'questions': result.questions,
-        'incompatibilities': result.incompatibilities,
-        'changes_made': result.changes_made,}
+# Don't allow contradictory statuses
+    if result.status == 'ready_for_validation' and result.questions or result.incompatibilities:
+        raise ValueError('"ready_for_validation" status is not allowed while questions and/or incompatibilities exist.')
+    else:
+        return {
+            'format_status': result.status,
+            'formatted_source': result.formatted_source,
+            'entrypoint_name': result.entrypoint_name,
+            'questions': result.questions,
+            'incompatibilities': result.incompatibilities,
+            'changes_made': result.changes_made,}
 
 # Router for formatting node
 def route_formatting(state):
