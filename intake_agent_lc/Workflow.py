@@ -59,6 +59,8 @@ class State(MessagesState):
     checks: list[str]
     checks_skipped: list[dict[str, str]]
     validation_errors: list
+    validation_feedback: dict | None
+    validation_failure_count: int
 
 
 
@@ -283,9 +285,12 @@ def code_formatting_node(state):
     user_answers = state.get('user_answers', [])
  
     approved_changes = state.get('approved_changes', [])
+
+    validation_feedback = state.get('validation_feedback')
     
     result = model.with_structured_output(FormattingResult).invoke([SystemMessage(content = system_prompt_formatting),
-        HumanMessage(content = f'''Original strategy source:{source_code}Examination notes:{formatting_notes}User clarification answers:{user_answers}User-approved compatibility changes:{approved_changes}''')])
+        HumanMessage(content = f'''Original strategy source:{source_code}Examination notes:{formatting_notes}User clarification answers:{user_answers}User-approved compatibility changes:{approved_changes}
+        Validation feedback (last failed draft and errors):{validation_feedback}''')])
 
 # Don't allow contradictory statuses
     if result.status == 'ready_for_validation' and (result.questions or result.incompatibilities):
@@ -336,7 +341,7 @@ def route_formatting(state):
 
 # questions_node Helper Function---------------------------------
 @task
-def evaluate_questions(source_code, formatting_notes, questions, user_answers, clarifiable_issues, approved_changes):
+def evaluate_questions(source_code, formatting_notes, questions, user_answers, clarifiable_issues, approved_changes, validation_feedback = None):
 
     result = model.with_structured_output(QuestionsResult).invoke([
         SystemMessage(content=system_prompt_questions),
@@ -356,7 +361,10 @@ All previous user answers:
 {user_answers}
 
 Approved compatibility changes:
-{approved_changes}''')])
+{approved_changes}
+
+Validation feedback (last failed draft and errors):
+{validation_feedback}''')])
 
     return result.model_dump()
 
@@ -372,10 +380,10 @@ def questions_node(state):
     result = QuestionsResult.model_validate(evaluate_questions(
             state.get('source_code'),
             state.get('formatting_notes', []),
-            state.get('questions', []),
-            previous_answers,
+            state.get('questions', []), previous_answers,
             state.get('clarifiable_issues', []),
-            state.get('approved_changes', [])).result())
+            state.get('approved_changes', []),
+            state.get('validation_feedback'),).result())
 
     # If all questions have been resolved, reject this route
     if result.questions_resolved:
@@ -536,6 +544,51 @@ def route_incompatibility(state):
 
 
 
+
+
+# Router for validation_node
+def route_validation(state):
+
+    # Grab validation node stuff for rotuing
+    status = state.get('validation_status')
+
+    if status == 'passed':
+        return 'passed'
+    elif status == 'failed':
+        return 'failed'
+    elif status == 'blocked':
+        return 'blocked'
+    else:
+        raise ValueError(f'Unexpected validation status: {status!r}')
+
+
+
+max_trys = 3
+
+def prepare_validation_correcting_node(state):
+
+    if state.get('validation_status') != 'failed':
+        raise ValueError('Correction requires a failed validation result.') 
+    validation_errors = state.get('validation_errors', [])
+
+    if not validation_errors:
+        raise ValueError('Failed validation must include error details.')
+    failures_amount = state.get('validation_failure_count', 0) + 1
+    return {'validation_failure_count': failures_amount,'validation_feedback': {'formatted_source': state.get('formatted_source'),'entrypoint_name': state.get('entrypoint_name'),'validation_errors': list(validation_errors),},'questions_resolved': False,}
+
+def route_validation_correction(state):
+    failure_count = state.get('validation_failure_count', 0)
+
+    if failure_count > max_trys:
+        return END
+    return 'questions'
+
+
+
+
+
+
+
 # Graph
 graph = StateGraph(State)
 graph.add_node("file_path", file_path_node)
@@ -545,7 +598,7 @@ graph.add_node("questions", questions_node)
 graph.add_node("incompatibility", hard_incompatibility_node)
 graph.add_node("formatting", code_formatting_node)
 graph.add_node("validation", validation_node)
-
+graph.add_node('validation_correction',prepare_validation_correcting_node,)
 
 graph.add_edge(START, "file_path")
 graph.add_edge("file_path", "file_check")
@@ -556,3 +609,5 @@ graph.add_conditional_edges('examine_file',route_examination,{'questions': 'ques
 graph.add_conditional_edges('formatting',route_formatting,{'incompatibility': 'incompatibility','questions': 'questions','validation': 'validation',})
 graph.add_conditional_edges('questions',route_questions,{'questions': 'questions','formatting': 'formatting'})
 graph.add_conditional_edges('incompatibility',route_incompatibility,{'questions': 'questions','incompatibility': 'incompatibility',END: END,})
+graph.add_conditional_edges('validation',route_validation,{'passed': END,'failed': 'validation_correction','blocked': END,},)
+graph.add_conditional_edges('validation_correction',route_validation_correction,{'questions': 'questions',END: END,},)
