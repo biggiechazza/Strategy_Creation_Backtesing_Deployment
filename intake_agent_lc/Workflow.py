@@ -231,8 +231,15 @@ def examine_file_node(state):
         raise ValueError('The uploaded file contains no identifiable trading strategy.')
 
     # Dont let statuses contradict themselves
-    elif result.status == 'ready' and result.questions or result.clarifiable_issues or result.incompatibilities:
+    elif result.status == 'ready' and (result.questions or result.clarifiable_issues or result.incompatibilities):
         raise ValueError('"ready" status is not allowed while questions and/or incompatibilities exist.')
+    
+    elif result.status == 'needs_clarification' and (not result.questions or not result.clarifiable_issues or result.incompatibilities):
+        raise ValueError('"needs_clarification" requires questions and clarification ''issues, with no confirmed incompatibilities.')
+
+    elif result.status == 'hard_incompatibility' and (not result.incompatibilities):
+        raise ValueError('"hard_incompatibility" requires incompatibility reasons.')
+    
     else:
     # Model returns this exact output
         return {
@@ -255,7 +262,7 @@ def route_examination(state):
 
     # Temporary for agent evals
     else:
-        print('Unexpected examination status, examine node.')
+        raise ValueError ('Unexpected examination status, examine node.')
 
 
 
@@ -279,8 +286,15 @@ def code_formatting_node(state):
         HumanMessage(content = f'''Original strategy source:{source_code}Examination notes:{formatting_notes}User clarification answers:{user_answers}User-approved compatibility changes:{approved_changes}''')])
 
 # Don't allow contradictory statuses
-    if result.status == 'ready_for_validation' and result.questions or result.incompatibilities:
+    if result.status == 'ready_for_validation' and (result.questions or result.incompatibilities):
         raise ValueError('"ready_for_validation" status is not allowed while questions and/or incompatibilities exist.')
+    
+    elif result.status == 'needs_clarification' and (not result.questions or result.incompatibilities):
+        raise ValueError('"needs_clarification" requires questions ''and cannot contain confirmed incompatibilities.')
+
+    elif result.status == 'hard_incompatibility' and not result.incompatibilities:
+        raise ValueError('"hard_incompatibility" requires incompatibility reasons.')
+    
     else:
         return {
             'format_status': result.status,
@@ -311,7 +325,8 @@ def route_formatting(state):
         if not isinstance(entrypoint_name, str) or not entrypoint_name.strip():
             raise ValueError('Formatting returned an empty or invalid entrypoint_name.')
         return 'validation'
-
+    else:
+        raise ValueError(f'Unexpected formatting status: {status!r}')
 
 
 
@@ -319,8 +334,7 @@ def route_formatting(state):
 
 # questions_node Helper Function---------------------------------
 @task
-def evaluate_questions(source_code, formatting_notes, questions,
-                       user_answers, clarifiable_issues, approved_changes):
+def evaluate_questions(source_code, formatting_notes, questions, user_answers, clarifiable_issues, approved_changes):
 
     result = model.with_structured_output(QuestionsResult).invoke([
         SystemMessage(content=system_prompt_questions),
@@ -361,16 +375,12 @@ def questions_node(state):
             state.get('clarifiable_issues', []),
             state.get('approved_changes', [])).result())
 
-    # All questions have been resolved
+    # If all questions have been resolved, reject this route
     if result.questions_resolved:
-
         if result.questions:
             raise ValueError(
                 'Questions marked resolved but additional questions were returned.')
-
-        return {
-            'questions': [],
-            'questions_resolved': True}
+        return {'questions': [], 'questions_resolved': True}
 
     # Unresolved questions require another user response
     if not result.questions:
@@ -378,14 +388,10 @@ def questions_node(state):
             'Questions remain unresolved but no follow-up questions were provided.')
 
     # Ask outstanding questions and collect answers
-    answers = interrupt({
-        'type': 'clarification_questions',
-        'questions': result.questions})
+    answers = interrupt({'type': 'clarification_questions', 'questions': result.questions})
 
     # Preserve all previous clarification rounds
-    updated_answers = previous_answers + [{
-        'questions': result.questions,
-        'answers': answers}]
+    updated_answers = previous_answers + [{'questions': result.questions, 'answers': answers}]
 
     return {
         'questions': result.questions,
