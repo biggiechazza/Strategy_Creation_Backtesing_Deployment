@@ -75,6 +75,8 @@ class QuestionsResult(BaseModel):
 
 class IncompatibilityResult(BaseModel):
 
+    status: Literal['proposal_ready', 'no_viable_proposal'] = Field(description = 'Whether a complete compatibility proposal can be offered.')
+
     incompatibility_summary: list[str] = Field(
         default_factory = list,
         description = 'Exact engine incompatibilities that prevent faithful adaptation.')
@@ -450,6 +452,14 @@ def hard_incompatibility_node(state):
         generate_proposal(source_code, incompatibilities).result())
 
     # Do not request approval for an incomplete proposal
+    if not proposal.incompatibility_summary:
+        raise ValueError('Missing compatibility explanation.')
+
+    if proposal.status == 'no_viable_proposal':
+        if proposal.proposed_changes or proposal.permission_questions:
+            raise ValueError('"no_viable_proposal" cannot contain changes or permission questions.')
+        return {'incompatibility_status': 'no_viable_proposal', 'incompatibilities': proposal.incompatibility_summary, 'incompatibility_questions': [], 'incompatibility_response': None,}
+
     if not proposal.proposed_changes or not proposal.permission_questions:
         raise ValueError('Incomplete compatibility proposal.')
 
@@ -517,7 +527,7 @@ def route_incompatibility(state):
     if status == 'approved':
         return 'questions'
 
-    elif status == 'rejected':
+    elif status in ('rejected', 'no_viable_proposal'):
         return END
 
     raise ValueError(f'Unexpected incompatibility status: {status}')
