@@ -17,6 +17,10 @@ from langgraph.graph import MessagesState, StateGraph, START, END
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import interrupt, Command
 
+from psycopg import Connection, Error
+from langgraph.runtime import Runtime
+from database.strategy_repository import (Duplicate_Name_Prob, create_strategy_with_initial_version,)
+
 load_dotenv()
 
 model = init_chat_model('gpt-6-luna')
@@ -62,7 +66,17 @@ class State(MessagesState):
     validation_feedback: dict | None
     validation_failure_count: int
 
+# Strategy details and database save result
+    strategy_name: str | None
+    strategy_description: str | None
+    strategy_id: int | None
+    strategy_version_id: int | None
+    save_status: Literal['saved', 'duplicate_name', 'failed'] | None
+    save_error: str | None
 
+# Connection supplied by the caller, separate from saved workflow state
+class IntakeContext(TypedDict):
+    db_connection: Connection
 
 class QuestionsResult(BaseModel):
 
@@ -586,11 +600,98 @@ def route_validation_correction(state):
 
 
 
+def collect_strategy_node(state):
+
+# Only collect save details after the strategy passes validation
+    if state.get('validation_status') != 'passed':
+        raise ValueError('Strategy details require passed validation.')
+
+    if state.get('save_status') == 'saved':
+        raise ValueError('This intake has already been saved.')
+
+    # Show the previous duplicate-name error when asking for a new name
+    name_error = (state.get('save_error')if state.get('save_status') == 'duplicate_name'else None)
+
+    while True:
+        name = interrupt({'type': 'strategy_name','prompt': 'Enter a name for this strategy:','error': name_error,})
+        if isinstance(name, str) and name.strip():
+            name = name.strip()
+            break
+
+        name_error = 'Enter a nonblank strategy name.'
+
+    # Description is optional, accept a blank response or None to skip it
+    description_error = None
+
+    while True:
+        description = interrupt({'type': 'strategy_description','prompt': 'Enter a description, or leave blank to skip:','error': description_error,})
+
+        if description is None or isinstance(description, str):
+            break
+
+        description_error = 'Enter a text description or leave it blank.'
+
+    if isinstance(description, str):
+        description = description.strip() or None
+
+    # Put the details in state and clear the previous save error for this attempt
+    return {
+        'strategy_name': name,
+        'strategy_description': description,
+        'save_status': None,
+        'save_error': None,}
+
+
+
+
+
+
+def write_node(state, runtime: Runtime[IntakeContext]):
+    # Only save a strategy that passed validation
+    if state.get('validation_status') != 'passed':
+        raise ValueError('Saving requires passed validation.')
+
+    # Reuse an already recorded saved result instead of inserting it again
+    if state.get('save_status') == 'saved':
+        if (state.get('strategy_id') is None or state.get('strategy_version_id') is None):
+            raise ValueError('Saved state is missing its database IDs.')
+        return {}
+
+    if runtime.context is None or runtime.context.get('db_connection') is None:
+        raise ValueError('The workflow requires a database connection.')
+
+    conn = runtime.context['db_connection']
+
+    # Only a successful repository call changes this result to saved
+    result = {'strategy_id': None,'strategy_version_id': None,'save_status': 'failed','save_error': None,}
+
+    try:
+        saved = create_strategy_with_initial_version(
+            conn, name=state.get('strategy_name'), description=state.get('strategy_description'), source_code=state.get('formatted_source'), entrypoint_name=state.get('entrypoint_name'),)
+
+    # Catch this before ValueError so a taken name gets its own route
+    except Duplicate_Name_Prob as error:
+        result['save_status'] = 'duplicate_name'
+        result['save_error'] = str(error)
+
+    # Keep raw connection errors and credentials out of saved state
+    except Error as error:
+        result['save_error'] = (f'Database save could not be confirmed ({type(error).__name__}). ''Check the database before retrying.')
+
+    except (ValueError, RuntimeError) as error:
+        result['save_error'] = str(error)
+
+    else:
+        result.update(saved)
+        result['save_status'] = 'saved'
+    return result
+
+
 
 
 
 # Graph
-graph = StateGraph(State)
+graph = StateGraph(State, context_schema = IntakeContext)
 graph.add_node("file_path", file_path_node)
 graph.add_node("file_check", file_check_node)
 graph.add_node('examine_file', examine_file_node)
