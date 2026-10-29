@@ -645,7 +645,6 @@ def collect_strategy_node(state):
 
 
 
-
 def write_node(state, runtime: Runtime[IntakeContext]):
     # Only save a strategy that passed validation
     if state.get('validation_status') != 'passed':
@@ -689,9 +688,23 @@ def write_node(state, runtime: Runtime[IntakeContext]):
 
 
 
+# Ask for another name if taken otherwise finish this intake
+def route_write(state):
+    status = state.get('save_status')
+    if status == 'duplicate_name':
+        return 'collect_strategy'
+    elif status in ('saved', 'failed'):
+        return END
+    raise ValueError(f'Unexpected save status: {status!r}')
+
+
+
 
 # Graph
 graph = StateGraph(State, context_schema = IntakeContext)
+
+
+# Nodes
 graph.add_node("file_path", file_path_node)
 graph.add_node("file_check", file_check_node)
 graph.add_node('examine_file', examine_file_node)
@@ -700,15 +713,33 @@ graph.add_node("incompatibility", hard_incompatibility_node)
 graph.add_node("formatting", code_formatting_node)
 graph.add_node("validation", validation_node)
 graph.add_node('validation_correction',prepare_validation_correcting_node,)
+graph.add_node('collect_strategy', collect_strategy_node)
+graph.add_node('write', write_node)
+
+
+
+
 
 graph.add_edge(START, "file_path")
 graph.add_edge("file_path", "file_check")
+graph.add_edge('collect_strategy', 'write')
+
+
+
 
 
 graph.add_conditional_edges("file_check",route_file_check,{"examine_file": "examine_file","file_path": "file_path",},)
+
 graph.add_conditional_edges('examine_file',route_examination,{'questions': 'questions', 'incompatibility': 'incompatibility', 'formatting': 'formatting',},)
+
 graph.add_conditional_edges('formatting',route_formatting,{'incompatibility': 'incompatibility','questions': 'questions','validation': 'validation',})
+
 graph.add_conditional_edges('questions',route_questions,{'questions': 'questions','formatting': 'formatting'})
+
 graph.add_conditional_edges('incompatibility',route_incompatibility,{'questions': 'questions','incompatibility': 'incompatibility',END: END,})
-graph.add_conditional_edges('validation',route_validation,{'passed': END,'failed': 'validation_correction','blocked': END,},)
+
+graph.add_conditional_edges('validation',route_validation,{'passed': 'collect_strategy','failed': 'validation_correction','blocked': END,},)
+
 graph.add_conditional_edges('validation_correction',route_validation_correction,{'questions': 'questions',END: END,},)
+
+graph.add_conditional_edges('write',route_write,{'collect_strategy': 'collect_strategy',END: END,},)
