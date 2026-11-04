@@ -743,3 +743,74 @@ graph.add_conditional_edges('validation',route_validation,{'passed': 'collect_st
 graph.add_conditional_edges('validation_correction',route_validation_correction,{'questions': 'questions',END: END,},)
 
 graph.add_conditional_edges('write',route_write,{'collect_strategy': 'collect_strategy',END: END,},)
+
+# Keep checkpoints so intake can pause and resume within this process
+checkpointer = InMemorySaver()
+intake_graph = graph.compile(checkpointer=checkpointer)
+
+
+
+
+# Terminal connection
+# State stores the conversation data, but doesn't collect terminal input.
+# When a node calls interrupt() the graph pauses and returns its question.
+
+# Display the model question and collect the value used to resume it
+def get_terminal_response(question_data):
+    if isinstance(question_data, str):
+        return input(f'{question_data}\n> ')
+
+ # The file path node sends its question as a plain string
+    if not isinstance(question_data, dict):
+        raise ValueError('Unsupported intake question data.')
+
+    # Ask each clarification question and keep its answer attached
+    interrupt_type = question_data.get('type')
+    if interrupt_type == 'clarification_questions':
+        answers = []
+
+        for question in question_data['questions']:
+            print(f'\n{question}')
+            answers.append({'question': question,'answer': input('> '),})
+        return answers
+
+    # Show the full proposal before asking the user to approve or reject it
+    if interrupt_type == 'engine_incompatibility':
+        for title, key in (('Engine incompatibilities', 'incompatibilities'), ('Proposed changes', 'proposed_changes'), ('Approval questions', 'permission_questions'),):
+            print(f'\n{title}:')
+            for item in question_data[key]:
+                print(f'- {item}')
+        print(question_data['instructions'])
+        return input('> ')
+
+     # Both metadata questions use the same prompt and error fields
+    if interrupt_type in ('strategy_name', 'strategy_description'):
+
+    # Show why the previous response was rejected before asking again
+        if question_data.get('error'):
+            print(question_data['error'])
+        return input(f"{question_data['prompt']}\n> ")
+    raise ValueError(f'Unsupported intake interrupt type: {interrupt_type!r}')
+
+
+
+# Run intake and resume it whenever the user answers a question
+def run_intake(conn):
+
+    # One intake per program launch, keep this thread through every resume
+    config = {'configurable': {'thread_id': 'intake'}}
+    context = {'db_connection': conn}
+    result = intake_graph.invoke({}, config, context=context, version='v2',)
+
+    while result.interrupts:
+        question = result.interrupts[0]
+
+        # File errors are stored in State rather than the file path question
+        if isinstance(question.value, str) and result.value.get('file_error'):
+            print(result.value['file_error'])
+
+        user_answer = get_terminal_response(question.value)
+
+        # Send the answer back using the same thread and connection
+        result = intake_graph.invoke(Command(resume={question.id: user_answer}), config, context=context, version='v2',)
+    return result.value
