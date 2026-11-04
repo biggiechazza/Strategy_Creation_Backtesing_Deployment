@@ -96,9 +96,12 @@ def main() -> int:
     run_command.add_argument('--quantity', type=int, default=1)
 
     # Cost free runs should be an explicit choice
-    run_command.add_argument('--cost-points', type=float, required=True)
+    run_command.add_argument('--cost-points', type = float, required = True)
     show_command = commands.add_parser('show', help='Retrieve a saved execution')
-    show_command.add_argument('run_id', type=int)
+    show_command.add_argument('run_id', type = int)
+        # Intake collects a strategy file and saves it as a new strategy and version 1
+    commands.add_parser('intake', help='Intake and save a Python strategy')
+
     args = parser.parse_args()
 
     password = getpass('PostgreSQL password for postgres: ')
@@ -115,6 +118,18 @@ def main() -> int:
 
         if args.command == 'run':
             run(conn, version_id=args.version_id, quantity=args.quantity, cost_points=args.cost_points)
+
+        elif args.command == 'intake':
+
+            # Only initialize the intake model when this command is selected
+            from intake_agent_lc.Workflow import run_intake
+
+            # Use the connection that already passed the test database check
+            state = run_intake(conn)
+
+            # Only a confirmed save counts as a successful intake command
+            return 0 if state.get('save_status') == 'saved' else 1
+
         else:
         # A single snapshot prevents mismatched run and trade data during concurrent updates
             saved = get_run(conn, run_id=args.run_id)
@@ -125,6 +140,7 @@ def main() -> int:
             pprint(saved, sort_dicts=False)
 
     return 0
+
 
 if __name__ == '__main__':
     raise SystemExit(main())
