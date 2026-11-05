@@ -120,19 +120,31 @@ def main() -> int:
             run(conn, version_id=args.version_id, quantity=args.quantity, cost_points=args.cost_points)
 
         elif args.command == 'intake':
+            try:
+                # Keep model setup out of commands that do not use intake
+                from intake_agent_lc.Workflow import run_intake
 
-            # Only initialize the intake model when this command is selected
-            from intake_agent_lc.Workflow import run_intake
+                state = run_intake(conn)
 
-            # Use the connection that already passed the test database check
-            state = run_intake(conn)
+            except (KeyboardInterrupt, EOFError):
+                print('\nIntake cancelled.')
 
-            # Only a confirmed save counts as a successful intake command
+                # The write may have committed before the interruption
+                print('If saving had started, check the database before retrying.')
+                return 130
+            except Exception as error:
+
+                # Raw errors can contain provider or connection details, only show the type
+                print(f'\nIntake stopped ({type(error).__name__}).')
+                print('If saving had started, check the database before retrying.')
+                return 1
+
+            # Finishing the conversation does not guarantee the strategy was saved
             return 0 if state.get('save_status') == 'saved' else 1
 
         else:
         # A single snapshot prevents mismatched run and trade data during concurrent updates
-            saved = get_run(conn, run_id=args.run_id)
+            saved = get_run(conn, run_id = args.run_id)
 
             if saved is None:
                 print(f'Run {args.run_id} was not found in {TEST_DATABASE}.')
