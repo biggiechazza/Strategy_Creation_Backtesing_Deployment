@@ -794,7 +794,7 @@ def get_terminal_response(question_data):
 
 
 
-# Run intake and resume it whenever the user answers a question
+# Run intake and resume it whenever a user answers a question
 def run_intake(conn):
 
     # One intake per program launch, keep this thread through every resume
@@ -805,7 +805,7 @@ def run_intake(conn):
     while result.interrupts:
         question = result.interrupts[0]
 
-        # File errors are stored in State rather than the file path question
+    # File errors are stored in State rather than the file path question
         if isinstance(question.value, str) and result.value.get('file_error'):
             print(result.value['file_error'])
 
@@ -813,4 +813,67 @@ def run_intake(conn):
 
         # Send the answer back using the same thread and connection
         result = intake_graph.invoke(Command(resume={question.id: user_answer}), config, context=context, version='v2',)
+
+        # Show why intake ended before returning its final State
+    show_intake_result(result.value)
     return result.value
+
+# Show the saved IDs or explain why intake stopped
+def show_intake_result(state):
+
+    # Check the save result first and show the IDs returned by the database
+    if state.get('save_status') == 'saved':
+        print('Strategy saved after passing static validation.')
+        print(f"Strategy ID: {state['strategy_id']}")
+        print(f"Strategy version ID: {state['strategy_version_id']}")
+
+        # Stop here so a saved intake doesn't reach the failure messages
+        return
+
+    # A save error doesn't always tell us whether the transaction committed
+    # Show the recorded error without assuming nothing was saved
+    if state.get('save_status') == 'failed':
+        print('Strategy save failed or could not be confirmed.')
+        print(state.get('save_error') or 'No additional save details are available.')
+
+    # The incompatibility router ends intake when the user rejects the changes
+    elif state.get('incompatibility_status') == 'rejected':
+        print('Intake stopped: compatibility changes were rejected.')
+
+    # The model couldn't provide a complete proposal from the available information
+    elif state.get('incompatibility_status') == 'no_viable_proposal':
+        print('Intake stopped: no complete compatibility proposal was available.')
+
+        # Show the reasons returned by the incompatibility node
+        for reason in state.get('incompatibilities', []):
+            print(f'- {reason}')
+
+    # Blocked means no errors were detected, but required static checks were skipped
+    elif state.get('validation_status') == 'blocked':
+        print('Intake stopped: required static checks could not be completed.')
+
+        # Show which checks couldn't run and why
+        for check in state.get('checks_skipped', []):
+            print(f"- {check['check']}: {check['reason']}")
+
+    # Failed means the static validator found errors
+    elif state.get('validation_status') == 'failed':
+
+        # The counter includes the initial failure and each failed correction
+        # Exceeding max_trys means all allowed correction attempts were used
+        if state.get('validation_failure_count', 0) > max_trys:
+            print(f'Intake stopped: static validation still failed after 'f'{max_trys} correction attempts.')
+        else:
+            print('Intake stopped: static validation failed.')
+
+        # Keep each error's code, explanation, and source location together
+        for error in state.get('validation_errors', []):
+            print(f"- {error['code']}: {error['explanation']}")
+
+            # Some errors concern missing fields and won't have a source location
+            if error.get('location'):
+                print(f"  {error['location']}")
+
+    # Don't report success if the graph ends without an expected result
+    else:
+        print('Intake ended without a confirmed save or recognized stopping reason.')
