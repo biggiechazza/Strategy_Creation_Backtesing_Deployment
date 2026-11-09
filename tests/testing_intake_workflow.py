@@ -309,5 +309,55 @@ class FixtureStrategy:
                 self.assertEqual(model_call.call_count, len(replies))
                 self.assertIn(message, output.getvalue())
 
+    def test_database_error_stops_without_retry_or_success(self):
+        '''Check an uncertain save stops once and does not expose raw connection details.
+
+        A driver error does not prove the transaction rolled back. The graph
+        should report an unconfirmed save without returning saved IDs.
+        '''
+        source = '''from app.models import Signal
+raise AssertionError("Fixture strategy source must never execute")
+class FixtureStrategy:
+    def evaluate(self, current_bar, prior_bars):
+        return Signal.HOLD
+'''
+        self.model.with_structured_output.return_value.invoke.side_effect = [
+            self.workflow.ExamineResult(status='ready'),
+            self.workflow.FormattingResult(
+                status='ready_for_validation',
+                formatted_source=source,
+                entrypoint_name='FixtureStrategy',
+            ),
+        ]
+        strategy_file = MagicMock()
+        strategy_file.exists.return_value = True
+        strategy_file.is_file.return_value = True
+        strategy_file.suffix = '.py'
+        strategy_file.read_bytes.return_value = source.encode('utf-8')
+        conn = object()
+        private_detail = 'private connection detail'
+        output = io.StringIO()
+
+        with patch.object(self.workflow, 'Path', return_value=strategy_file), \
+                patch('builtins.input', side_effect=['fixture.py', 'Example', '']), \
+                patch.object(self.workflow, 'create_strategy_with_initial_version',
+                    side_effect=self.workflow.Error(private_detail)) as create_strategy, \
+                redirect_stdout(output):
+            state = self.workflow.run_intake(conn)
+
+        self.assertEqual(state['validation_status'], 'passed')
+        self.assertEqual(state['save_status'], 'failed')
+        self.assertIsNone(state['strategy_id'])
+        self.assertIsNone(state['strategy_version_id'])
+        create_strategy.assert_called_once_with(
+            conn, name='Example', description=None,
+            source_code=source, entrypoint_name='FixtureStrategy',
+        )
+        self.assertNotIn(private_detail, state['save_error'])
+        self.assertNotIn(private_detail, output.getvalue())
+        self.assertIn('could not be confirmed', output.getvalue())
+        self.assertIn('Check the database before retrying.', output.getvalue())
+        self.assertNotIn('Strategy saved after passing static validation.', output.getvalue())
+
 if __name__ == '__main__':
     unittest.main()
