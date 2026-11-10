@@ -1,0 +1,879 @@
+
+from dotenv import load_dotenv
+import uuid
+from pathlib import Path
+from typing import Literal, TypedDict
+from .System_Prompt import (system_prompt_node_3, system_prompt_formatting, system_prompt_incompatibility, system_prompt_compatibility_decision, system_prompt_questions)
+from .Validation_Node import validation_node
+import ast
+from pydantic import BaseModel, Field
+
+from langchain.chat_models import init_chat_model
+from langchain.messages import HumanMessage, SystemMessage
+from langchain.tools import tool
+
+from langgraph.func import task
+from langgraph.graph import MessagesState, StateGraph, START, END
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import interrupt, Command
+
+from psycopg import Connection, Error
+from langgraph.runtime import Runtime
+from database.strategy_repository import (Duplicate_Name_Prob, create_strategy_with_initial_version,)
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".envapi")
+
+model = init_chat_model('gpt-6-luna')
+
+# Shared Memory & Classes
+class State(MessagesState):
+# Path to users
+    file_path: str | None
+    file_valid: bool | None
+    file_error: str | None
+
+# Original user strategy code
+    source_code: str | None
+
+# Node 3 examine_file_node
+    examination_status: str | None
+    questions: list
+    clarifiable_issues: list
+    incompatibilities: list
+    formatting_notes: list
+
+# Node 5 questions_node
+    user_answers: list
+    questions_resolved: bool | None
+
+# Node 6 Incompatibility & potential changes
+    approved_changes: list
+    incompatibility_status: str | None
+    incompatibility_questions: list
+    incompatibility_response: object | None
+
+# Node 4 Formatting
+    format_status: str | None
+    formatted_source: str | None
+    entrypoint_name: str | None
+    changes_made: list
+
+# Node 7 Validation
+    validation_status: Literal['passed', 'failed', 'blocked'] | None
+    checks: list[str]
+    checks_skipped: list[dict[str, str]]
+    validation_errors: list
+    validation_feedback: dict | None
+    validation_failure_count: int
+
+# Strategy details and database save result
+    strategy_name: str | None
+    strategy_description: str | None
+    strategy_id: int | None
+    strategy_version_id: int | None
+    save_status: Literal['saved', 'duplicate_name', 'failed'] | None
+    save_error: str | None
+
+# Connection supplied by the caller, separate from saved workflow state
+class IntakeContext(TypedDict):
+    db_connection: Connection
+
+class QuestionsResult(BaseModel):
+
+    questions_resolved: bool = Field(
+        description='True only when all material clarification questions have been adequately answered.')
+
+    questions: list[str] = Field(
+        default_factory=list,
+        description='Remaining or follow-up questions. Empty when all questions are resolved.')
+
+
+
+class IncompatibilityResult(BaseModel):
+
+    status: Literal['proposal_ready', 'no_viable_proposal'] = Field(description = 'Whether a complete compatibility proposal can be offered.')
+
+    incompatibility_summary: list[str] = Field(
+        default_factory = list,
+        description = 'Exact engine incompatibilities that prevent faithful adaptation.')
+
+    proposed_changes: list[str] = Field(
+        default_factory = list,
+        description = 'Minimum necessary changes to strategy behavior required for engine compatibility.')
+
+    permission_questions: list[str] = Field(
+        default_factory = list,
+        description = 'Questions asking the user for explicit approval of each required behavioral change.')
+
+
+
+class FormattingResult(BaseModel):
+    status: Literal[
+        'ready_for_validation',
+        'needs_clarification',
+        'hard_incompatibility'] = Field(description = 'Determines where the graph routes after or during formatting.')
+
+    formatted_source: str | None = Field(
+        default = None,
+        description = 'Complete formatted Python strategy source when formatting can be completed.')
+
+    entrypoint_name: str | None = Field(
+        default = None,
+        description = 'Exact class name of the formatted strategy entrypoint.')
+
+    questions: list[str] = Field(
+        default_factory = list,
+        description = 'Any new material questions discovered during formatting.')
+
+    incompatibilities: list[str] = Field(
+        default_factory = list,
+        description = 'Any engine incompatibilities discovered during formatting.')
+
+    changes_made: list[str] = Field(
+        default_factory = list,
+        description = 'Changes made while adapting the strategy to the engine contract.')
+
+
+
+# Only used during Node 3 examine_file_node
+class ExamineResult(BaseModel):
+    status: Literal['ready', 'needs_clarification', 'hard_incompatibility', 'not_strategy'] = Field(description = 'The routing outcome produced by examination.')
+
+    questions: list[str] = Field(
+        default_factory = list,
+        description='Material questions the user must answer before formatting.')
+
+    clarifiable_issues: list[str] = Field(
+        default_factory = list,
+        description='Ambiguities that can be resolved through user clarification.')
+
+    incompatibilities: list[str] = Field(
+        default_factory = list,
+        description='Engine incompatibilities identified in the strategy, or it is not a identifiable trading strategy.')
+
+    formatting_notes: list[str] = Field(
+        default_factory = list,
+        description='Source established facts the formatting node must preserve.')
+
+
+
+class CompatibilityDecision(BaseModel):
+    status: Literal[
+        'approved',
+        'rejected',
+        'needs_response'] = Field(description='Whether the user explicitly approved the proposed compatibility changes.')
+
+
+# Node functions
+
+# Node 1
+def file_path_node(state):
+    # User Provides File Path
+    file_path = interrupt('Paste the exact/full file path to the encoded strategy you want to backtest:')
+    return {**state, 'file_path': file_path, 'file_error': None,}
+
+
+def file_check_node(state):
+    file_path = state.get("file_path")
+
+    # Catch errors during path validation, reading, and compilation
+    try:
+        path = Path(file_path)
+
+        if not path.exists():
+            return {
+                "file_valid": False,
+                "file_error": f"File not found: {path}"}
+
+        elif not path.is_file():
+            return {
+                "file_valid": False,
+                "file_error": f"Path is not a file: {path}"}
+
+        elif path.suffix.lower() != ".py":
+            return {
+                "file_valid": False,
+                "file_error": "File must be a Python .py file."}
+
+        # Read the file and validate its Python syntax
+        source_code = path.read_bytes().decode("utf-8")
+        ast.parse(source_code)
+        compile(source_code, str(path), 'exec')
+
+    except UnicodeDecodeError:
+        return {
+            "file_valid": False,
+            "file_error": "File is not valid UTF-8."}
+
+    except SyntaxError as error:
+        return {
+            "file_valid": False,
+            "file_error": f"Invalid Python syntax: {error}"}
+
+    except Exception as error:
+        return {
+            "file_valid": False,
+            "file_error": f"Unexpected error: {error}"}
+
+    return {
+        "file_valid": True,
+        "file_error": None,
+        "source_code": source_code}
+
+
+
+
+# Routing decisions begin
+# NOT a node, if the file wasn't valid return to the file_path node
+def route_file_check(state):
+    if state.get('file_valid') == True and state.get('file_error') == None:
+        return 'examine_file'
+    return 'file_path'
+
+
+
+
+
+
+# Node 3, three potential nodes after: questions_node or code_formatting_node or hard_incompatibility_node
+def examine_file_node(state):
+    source_code = state.get('source_code')
+
+    # Model looks at the source code from the user file and determines the appropriate routing and questions and produces reasons for its actions.
+    result = model.with_structured_output(ExamineResult).invoke([
+        SystemMessage(content = system_prompt_node_3), HumanMessage(content = f'Examine the following strategy source:\n\n{source_code}')])
+
+    # Check if the model determined the file is not a strategy, and raise an error if so
+    if result.status == 'not_strategy':
+        print(result.incompatibilities)
+        raise ValueError('The uploaded file contains no identifiable trading strategy.')
+
+    # Dont let statuses contradict themselves
+    elif result.status == 'ready' and (result.questions or result.clarifiable_issues or result.incompatibilities):
+        raise ValueError('"ready" status is not allowed while questions and/or incompatibilities exist.')
+    
+    elif result.status == 'needs_clarification' and (not result.questions or not result.clarifiable_issues or result.incompatibilities):
+        raise ValueError('"needs_clarification" requires questions and clarification ''issues, with no confirmed incompatibilities.')
+
+    elif result.status == 'hard_incompatibility' and (not result.incompatibilities):
+        raise ValueError('"hard_incompatibility" requires incompatibility reasons.')
+    
+    else:
+    # Model returns this exact output
+        return {
+            'examination_status': result.status,
+            'questions': result.questions,
+            'clarifiable_issues': result.clarifiable_issues,
+            'incompatibilities': result.incompatibilities,
+            'formatting_notes': result.formatting_notes,}
+
+
+# Grab 'examination_status' from the models output and tell the graph which node to use initially.
+def route_examination(state):
+    status = state.get('examination_status')
+    if status == 'needs_clarification':
+        return 'questions'
+    elif status == 'hard_incompatibility':
+        return 'incompatibility'
+    elif status == 'ready':
+        return 'formatting'
+
+    # Temporary for agent evals
+    else:
+        raise ValueError ('Unexpected examination status, examine node.')
+
+
+
+
+
+
+
+
+# PATH 1 after examine_file, Node 4: Direct to Formatting
+def code_formatting_node(state):
+
+    source_code = state.get('source_code')
+
+    formatting_notes = state.get('formatting_notes', [])
+    
+    user_answers = state.get('user_answers', [])
+ 
+    approved_changes = state.get('approved_changes', [])
+
+    validation_feedback = state.get('validation_feedback')
+    
+    result = model.with_structured_output(FormattingResult).invoke([SystemMessage(content = system_prompt_formatting),
+        HumanMessage(content = f'''Original strategy source:{source_code}Examination notes:{formatting_notes}User clarification answers:{user_answers}User-approved compatibility changes:{approved_changes}
+        Validation feedback (last failed draft and errors):{validation_feedback}''')])
+
+# Don't allow contradictory statuses
+    if result.status == 'ready_for_validation' and (result.questions or result.incompatibilities):
+        raise ValueError('"ready_for_validation" status is not allowed while questions and/or incompatibilities exist.')
+    
+    elif result.status == 'needs_clarification' and (not result.questions or result.incompatibilities):
+        raise ValueError('"needs_clarification" requires questions ''and cannot contain confirmed incompatibilities.')
+
+    elif result.status == 'hard_incompatibility' and not result.incompatibilities:
+        raise ValueError('"hard_incompatibility" requires incompatibility reasons.')
+    
+    else:
+        return {
+            'format_status': result.status,
+            'formatted_source': result.formatted_source,
+            'entrypoint_name': result.entrypoint_name,
+            'questions': result.questions,
+            'incompatibilities': result.incompatibilities,
+            'changes_made': result.changes_made,}
+
+# Router for formatting node
+def route_formatting(state):
+    status = state.get('format_status')
+
+# See if the model outputted any issues or questions
+    if status == 'hard_incompatibility':
+        return 'incompatibility'
+    elif status == 'needs_clarification':
+        return 'questions'
+
+    # Only approve the move to validation if the new formatted source is valid
+    elif status == 'ready_for_validation':
+        formatted_source = state.get('formatted_source')
+        entrypoint_name = state.get('entrypoint_name')
+
+        if not isinstance(formatted_source, str) or not formatted_source.strip():
+            raise ValueError('Formatting returned an empty or invalid formatted_source.')
+
+        if not isinstance(entrypoint_name, str) or not entrypoint_name.strip():
+            raise ValueError('Formatting returned an empty or invalid entrypoint_name.')
+        return 'validation'
+    else:
+        raise ValueError(f'Unexpected formatting status: {status!r}')
+
+
+
+
+
+# questions_node Helper Function---------------------------------
+@task
+def evaluate_questions(source_code, formatting_notes, questions, user_answers, clarifiable_issues, approved_changes, validation_feedback = None):
+
+    result = model.with_structured_output(QuestionsResult).invoke([
+        SystemMessage(content=system_prompt_questions),
+        HumanMessage(content=f'''Original strategy source:
+{source_code}
+
+Examination notes:
+{formatting_notes}
+
+Identified clarifiable issues:
+{clarifiable_issues}
+
+Current clarification questions:
+{questions}
+
+All previous user answers:
+{user_answers}
+
+Approved compatibility changes:
+{approved_changes}
+
+Validation feedback (last failed draft and errors):
+{validation_feedback}''')])
+
+    return result.model_dump()
+
+
+
+# PATH 2 after examine_file, Node 5: Questions
+def questions_node(state):
+
+    # Grab previous user answers
+    previous_answers = state.get('user_answers', [])
+
+    # Evaluate all clarification requirements and previous answers
+    result = QuestionsResult.model_validate(evaluate_questions(
+            state.get('source_code'),
+            state.get('formatting_notes', []),
+            state.get('questions', []), previous_answers,
+            state.get('clarifiable_issues', []),
+            state.get('approved_changes', []),
+            state.get('validation_feedback'),).result())
+
+    # If all questions have been resolved, reject this route
+    if result.questions_resolved:
+        if result.questions:
+            raise ValueError(
+                'Questions marked resolved but additional questions were returned.')
+        return {'questions': [], 'questions_resolved': True}
+
+    # Unresolved questions require another user response
+    if not result.questions:
+        raise ValueError(
+            'Questions remain unresolved but no follow-up questions were provided.')
+
+    # Ask outstanding questions and collect answers
+    answers = interrupt({'type': 'clarification_questions', 'questions': result.questions})
+
+    # Preserve all previous clarification rounds
+    updated_answers = previous_answers + [{'questions': result.questions, 'answers': answers}]
+
+    return {
+        'questions': result.questions,
+        'user_answers': updated_answers,
+        'questions_resolved': False}
+
+# Router for questions_node
+def route_questions(state):
+
+    if state.get('questions_resolved') is True:
+        return 'formatting'
+
+    elif state.get('questions_resolved') is False:
+        return 'questions'
+
+    raise ValueError('Unexpected questions_resolved value.')
+
+
+
+
+
+# INCOMPATIBILITY NODE HELPER FUNCTIONS ---------------------------------------
+@task
+def generate_proposal(source_code, incompatibilities):
+
+    result = model.with_structured_output(IncompatibilityResult).invoke([
+        SystemMessage(content = system_prompt_incompatibility),
+        HumanMessage(content = f'''Original strategy source:{source_code}Detected engine incompatibilities:{incompatibilities}''')])
+    return result.model_dump()
+
+
+
+@task
+def evaluate_response(proposed_changes, permission_questions, user_response):
+
+    decision = model.with_structured_output(CompatibilityDecision).invoke([
+        SystemMessage(content = system_prompt_compatibility_decision),
+        HumanMessage(content = f'''Proposed changes:{proposed_changes}Permission questions:{permission_questions}User response:{user_response}''')])
+    return decision.model_dump()
+
+
+
+# PATH 3 after examine_file, Node 5: Hard Incompatibility
+def hard_incompatibility_node(state):
+
+    # Grab incompatibilities and previous approved changes from state
+    incompatibilities = state.get('incompatibilities', [])
+    source_code = state.get('source_code')
+    previous_approved_changes = state.get('approved_changes', [])
+
+    if not source_code or not incompatibilities:
+        raise ValueError('Missing strategy source or engine incompatibilities.')
+
+    # Generate the checkpointed proposal
+    proposal = IncompatibilityResult.model_validate(
+        generate_proposal(source_code, incompatibilities).result())
+
+    # Do not request approval for an incomplete proposal
+    if not proposal.incompatibility_summary:
+        raise ValueError('Missing compatibility explanation.')
+
+    if proposal.status == 'no_viable_proposal':
+        if proposal.proposed_changes or proposal.permission_questions:
+            raise ValueError('"no_viable_proposal" cannot contain changes or permission questions.')
+        return {'incompatibility_status': 'no_viable_proposal', 'incompatibilities': proposal.incompatibility_summary, 'incompatibility_questions': [], 'incompatibility_response': None,}
+
+    if not proposal.proposed_changes or not proposal.permission_questions:
+        raise ValueError('Incomplete compatibility proposal.')
+
+
+
+    while True:
+    # Continue asking for confirmation until approval or rejection is clear from the user
+        user_response = interrupt({
+            'type': 'engine_incompatibility',
+            'incompatibilities': proposal.incompatibility_summary,
+            'proposed_changes': proposal.proposed_changes,
+            'permission_questions': proposal.permission_questions,
+    # Keywords temporary
+            'instructions': 'Reply with exactly "approve all" to approve every change, or "reject" to reject them. Other responses require clarification.'})
+
+        response_text = (
+            user_response.strip().casefold()
+            if isinstance(user_response, str)else '')
+
+    # Explicit rejection requires no model
+        if response_text == 'reject' or response_text == 'Rejected':
+            status = 'rejected'
+            break
+    
+        decision = CompatibilityDecision.model_validate(
+            evaluate_response(
+                proposal.proposed_changes,
+                proposal.permission_questions,
+                user_response).result())
+
+    # Approval requires user approval and model approval
+        if response_text == 'approve all' and decision.status == 'approved':
+            status = 'approved'
+            break
+
+        if decision.status == 'rejected':
+            status = 'rejected'
+            break
+
+    
+    # Preserve previous approvals unless the new proposal was approved
+    approved_changes = list(previous_approved_changes)
+
+    if status == 'approved':
+        already_approved = any(
+            isinstance(change, dict)
+            and change.get('proposed_changes') == proposal.proposed_changes
+            for change in approved_changes)
+
+        if not already_approved:
+            approved_changes.append({
+                'proposed_changes': proposal.proposed_changes,
+                'user_response': user_response})
+
+    return {
+        'approved_changes': approved_changes,
+        'incompatibility_status': status,
+        'incompatibility_questions': proposal.permission_questions,
+        'incompatibility_response': user_response}
+
+# Router for incompatibility_node
+def route_incompatibility(state):
+    status = state.get('incompatibility_status')
+
+    if status == 'approved':
+        return 'questions'
+
+    elif status in ('rejected', 'no_viable_proposal'):
+        return END
+
+    raise ValueError(f'Unexpected incompatibility status: {status}')
+
+
+
+
+
+
+
+# Router for validation_node
+def route_validation(state):
+
+    # Grab validation node stuff for rotuing
+    status = state.get('validation_status')
+
+    if status == 'passed':
+        return 'passed'
+    elif status == 'failed':
+        return 'failed'
+    elif status == 'blocked':
+        return 'blocked'
+    else:
+        raise ValueError(f'Unexpected validation status: {status!r}')
+
+
+
+max_trys = 3
+
+def prepare_validation_correcting_node(state):
+
+    if state.get('validation_status') != 'failed':
+        raise ValueError('Correction requires a failed validation result.') 
+    validation_errors = state.get('validation_errors', [])
+
+    if not validation_errors:
+        raise ValueError('Failed validation must include error details.')
+    failures_amount = state.get('validation_failure_count', 0) + 1
+    return {'validation_failure_count': failures_amount,'validation_feedback': {'formatted_source': state.get('formatted_source'),'entrypoint_name': state.get('entrypoint_name'),'validation_errors': list(validation_errors),},'questions_resolved': False,}
+
+def route_validation_correction(state):
+    failure_count = state.get('validation_failure_count', 0)
+
+    if failure_count > max_trys:
+        return END
+    return 'questions'
+
+
+
+
+def collect_strategy_node(state):
+
+# Only collect save details after the strategy passes validation
+    if state.get('validation_status') != 'passed':
+        raise ValueError('Strategy details require passed validation.')
+
+    if state.get('save_status') == 'saved':
+        raise ValueError('This intake has already been saved.')
+
+    # Show the previous duplicate-name error when asking for a new name
+    name_error = (state.get('save_error')if state.get('save_status') == 'duplicate_name'else None)
+
+    while True:
+        name = interrupt({'type': 'strategy_name','prompt': 'Enter a name for this strategy:','error': name_error,})
+        if isinstance(name, str) and name.strip():
+            name = name.strip()
+            break
+
+        name_error = 'Enter a nonblank strategy name.'
+
+    # Description is optional, accept a blank response or None to skip it
+    description_error = None
+
+    while True:
+        description = interrupt({'type': 'strategy_description','prompt': 'Enter a description, or leave blank to skip:','error': description_error,})
+
+        if description is None or isinstance(description, str):
+            break
+
+        description_error = 'Enter a text description or leave it blank.'
+
+    if isinstance(description, str):
+        description = description.strip() or None
+
+    # Put the details in state and clear the previous save error for this attempt
+    return {
+        'strategy_name': name,
+        'strategy_description': description,
+        'save_status': None,
+        'save_error': None,}
+
+
+
+
+
+def write_node(state, runtime: Runtime[IntakeContext]):
+    # Only save a strategy that passed validation
+    if state.get('validation_status') != 'passed':
+        raise ValueError('Saving requires passed validation.')
+
+    # Reuse an already recorded saved result instead of inserting it again
+    if state.get('save_status') == 'saved':
+        if (state.get('strategy_id') is None or state.get('strategy_version_id') is None):
+            raise ValueError('Saved state is missing its database IDs.')
+        return {}
+
+    if runtime.context is None or runtime.context.get('db_connection') is None:
+        raise ValueError('The workflow requires a database connection.')
+
+    conn = runtime.context['db_connection']
+
+    # Only a successful repository call changes this result to saved
+    result = {'strategy_id': None,'strategy_version_id': None,'save_status': 'failed','save_error': None,}
+
+    try:
+        saved = create_strategy_with_initial_version(
+            conn, name=state.get('strategy_name'), description=state.get('strategy_description'), source_code=state.get('formatted_source'), entrypoint_name=state.get('entrypoint_name'),)
+
+    # Catch this before ValueError so a taken name gets its own route
+    except Duplicate_Name_Prob as error:
+        result['save_status'] = 'duplicate_name'
+        result['save_error'] = str(error)
+
+    # Keep raw connection errors and credentials out of saved state
+    except Error as error:
+        result['save_error'] = (f'Database save could not be confirmed ({type(error).__name__}). ''Check the database before retrying.')
+
+    except (ValueError, RuntimeError) as error:
+        result['save_error'] = str(error)
+
+    else:
+        result.update(saved)
+        result['save_status'] = 'saved'
+    return result
+
+
+
+
+# Ask for another name if taken otherwise finish this intake
+def route_write(state):
+    status = state.get('save_status')
+    if status == 'duplicate_name':
+        return 'collect_strategy'
+    elif status in ('saved', 'failed'):
+        return END
+    raise ValueError(f'Unexpected save status: {status!r}')
+
+
+
+
+# Graph
+graph = StateGraph(State, context_schema = IntakeContext)
+
+
+# Nodes
+graph.add_node("file_path", file_path_node)
+graph.add_node("file_check", file_check_node)
+graph.add_node('examine_file', examine_file_node)
+graph.add_node("questions", questions_node)
+graph.add_node("incompatibility", hard_incompatibility_node)
+graph.add_node("formatting", code_formatting_node)
+graph.add_node("validation", validation_node)
+graph.add_node('validation_correction',prepare_validation_correcting_node,)
+graph.add_node('collect_strategy', collect_strategy_node)
+graph.add_node('write', write_node)
+
+
+
+
+
+graph.add_edge(START, "file_path")
+graph.add_edge("file_path", "file_check")
+graph.add_edge('collect_strategy', 'write')
+
+
+
+
+
+graph.add_conditional_edges("file_check",route_file_check,{"examine_file": "examine_file","file_path": "file_path",},)
+
+graph.add_conditional_edges('examine_file',route_examination,{'questions': 'questions', 'incompatibility': 'incompatibility', 'formatting': 'formatting',},)
+
+graph.add_conditional_edges('formatting',route_formatting,{'incompatibility': 'incompatibility','questions': 'questions','validation': 'validation',})
+
+graph.add_conditional_edges('questions',route_questions,{'questions': 'questions','formatting': 'formatting'})
+
+graph.add_conditional_edges('incompatibility',route_incompatibility,{'questions': 'questions','incompatibility': 'incompatibility',END: END,})
+
+graph.add_conditional_edges('validation',route_validation,{'passed': 'collect_strategy','failed': 'validation_correction','blocked': END,},)
+
+graph.add_conditional_edges('validation_correction',route_validation_correction,{'questions': 'questions',END: END,},)
+
+graph.add_conditional_edges('write',route_write,{'collect_strategy': 'collect_strategy',END: END,},)
+
+# Keep checkpoints so intake can pause and resume within this process
+checkpointer = InMemorySaver()
+intake_graph = graph.compile(checkpointer=checkpointer)
+
+
+
+
+# Terminal connection
+# State stores the conversation data, but doesn't collect terminal input.
+# When a node calls interrupt() the graph pauses and returns its question.
+
+# Display the model question and collect the value used to resume it
+def get_terminal_response(question_data):
+    if isinstance(question_data, str):
+        return input(f'{question_data}\n> ')
+
+ # The file path node sends its question as a plain string
+    if not isinstance(question_data, dict):
+        raise ValueError('Unsupported intake question data.')
+
+    # Ask each clarification question and keep its answer attached
+    interrupt_type = question_data.get('type')
+    if interrupt_type == 'clarification_questions':
+        answers = []
+
+        for question in question_data['questions']:
+            print(f'\n{question}')
+            answers.append({'question': question,'answer': input('> '),})
+        return answers
+
+    # Show the full proposal before asking the user to approve or reject it
+    if interrupt_type == 'engine_incompatibility':
+        for title, key in (('Engine incompatibilities', 'incompatibilities'), ('Proposed changes', 'proposed_changes'), ('Approval questions', 'permission_questions'),):
+            print(f'\n{title}:')
+            for item in question_data[key]:
+                print(f'- {item}')
+        print(question_data['instructions'])
+        return input('> ')
+
+     # Both metadata questions use the same prompt and error fields
+    if interrupt_type in ('strategy_name', 'strategy_description'):
+
+    # Show why the previous response was rejected before asking again
+        if question_data.get('error'):
+            print(question_data['error'])
+        return input(f"{question_data['prompt']}\n> ")
+    raise ValueError(f'Unsupported intake interrupt type: {interrupt_type!r}')
+
+
+
+# Run intake and resume it whenever a user answers a question
+def run_intake(conn):
+
+    # One intake per program launch, keep this thread through every resume
+    config = {'configurable': {'thread_id': 'intake'}}
+    context = {'db_connection': conn}
+    result = intake_graph.invoke({}, config, context=context, version='v2',)
+
+    while result.interrupts:
+        question = result.interrupts[0]
+
+    # File errors are stored in State rather than the file path question
+        if isinstance(question.value, str) and result.value.get('file_error'):
+            print(result.value['file_error'])
+
+        user_answer = get_terminal_response(question.value)
+
+        # Send the answer back using the same thread and connection
+        result = intake_graph.invoke(Command(resume={question.id: user_answer}), config, context=context, version='v2',)
+
+        # Show why intake ended before returning its final State
+    show_intake_result(result.value)
+    return result.value
+
+# Show the saved IDs or explain why intake stopped
+def show_intake_result(state):
+
+    # Check the save result first and show the IDs returned by the database
+    if state.get('save_status') == 'saved':
+        print('Strategy saved after passing static validation.')
+        print(f"Strategy ID: {state['strategy_id']}")
+        print(f"Strategy version ID: {state['strategy_version_id']}")
+
+        # Stop here so a saved intake doesn't reach the failure messages
+        return
+
+    # A save error doesn't always tell us whether the transaction committed
+    # Show the recorded error without assuming nothing was saved
+    if state.get('save_status') == 'failed':
+        print('Strategy save failed or could not be confirmed.')
+        print(state.get('save_error') or 'No additional save details are available.')
+
+    # The incompatibility router ends intake when the user rejects the changes
+    elif state.get('incompatibility_status') == 'rejected':
+        print('Intake stopped: compatibility changes were rejected.')
+
+    # The model couldn't provide a complete proposal from the available information
+    elif state.get('incompatibility_status') == 'no_viable_proposal':
+        print('Intake stopped: no complete compatibility proposal was available.')
+
+        # Show the reasons returned by the incompatibility node
+        for reason in state.get('incompatibilities', []):
+            print(f'- {reason}')
+
+    # Blocked means no errors were detected, but required static checks were skipped
+    elif state.get('validation_status') == 'blocked':
+        print('Intake stopped: required static checks could not be completed.')
+
+        # Show which checks couldn't run and why
+        for check in state.get('checks_skipped', []):
+            print(f"- {check['check']}: {check['reason']}")
+
+    # Failed means the static validator found errors
+    elif state.get('validation_status') == 'failed':
+
+        # The counter includes the initial failure and each failed correction
+        # Exceeding max_trys means all allowed correction attempts were used
+        if state.get('validation_failure_count', 0) > max_trys:
+            print(f'Intake stopped: static validation still failed after 'f'{max_trys} correction attempts.')
+        else:
+            print('Intake stopped: static validation failed.')
+
+        # Keep each error's code, explanation, and source location together
+        for error in state.get('validation_errors', []):
+            print(f"- {error['code']}: {error['explanation']}")
+
+            # Some errors concern missing fields and won't have a source location
+            if error.get('location'):
+                print(f"  {error['location']}")
+
+    # Don't report success if the graph ends without an expected result
+    else:
+        print('Intake ended without a confirmed save or recognized stopping reason.')
