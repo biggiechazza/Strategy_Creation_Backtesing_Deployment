@@ -1,4 +1,6 @@
 .env1/
+.envapi
+Known_Issues.txt
 __pycache__/
 *.py[cod]
 .mypy_cache/
