@@ -1,4 +1,3 @@
-
 name: Python CI
 
 on:
@@ -12,7 +11,34 @@ permissions:
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: strategy_app_test
+          POSTGRES_USER: postgres
+          # Disposable CI credentials; never use a personal database password here.
+          POSTGRES_PASSWORD: ci_only_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d strategy_app_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      PGHOST: localhost
+      PGPORT: '5432'
+      PGDATABASE: strategy_app_test
+      PGUSER: postgres
+      PGPASSWORD: ci_only_password
+      STRATEGY_APP_TEST_DB_PASSWORD: ci_only_password
+      LANGSMITH_TRACING: 'false'
+      LANGCHAIN_TRACING_V2: 'false'
 
     steps:
       - name: Checkout repository
@@ -22,6 +48,35 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install and check dependencies
+        run: |
+          python -m pip install --requirement requirements.txt
+          python -m pip check
+
+      - name: Verify package imports
+        run: python -c "import psycopg, langchain, langgraph, langchain_openai, pydantic, dotenv"
+
+      - name: Initialize test database
+        run: |
+          : "${STRATEGY_APP_TEST_DB_PASSWORD:?CI database password is required}"
+          psql --set=ON_ERROR_STOP=1 --file=database/sql/postgres_schema.sql
+          psql --set=ON_ERROR_STOP=1 --command="SELECT current_database(), current_schema();"
 
       - name: Run tests
-        run: python -m unittest discover -s tests -p 'test*.py' -v
+        run: |
+          python - <<'PY'
+          import sys
+          import unittest
+
+          suite = unittest.defaultTestLoader.discover('tests', pattern='test*.py')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+
+          if result.testsRun == 0:
+              sys.exit('CI did not discover any tests.')
+          if result.skipped:
+              sys.exit(f'CI requires tests to execute; {len(result.skipped)} were skipped.')
+          sys.exit(0 if result.wasSuccessful() else 1)
+          PY
