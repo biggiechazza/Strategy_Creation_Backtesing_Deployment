@@ -1,12 +1,9 @@
-"""Focused tests for the shared backtesting domain contracts."""
-
+# Test the shared backtesting domain contracts.
 from __future__ import annotations
-
 import unittest
 from dataclasses import FrozenInstanceError, is_dataclass
 from datetime import date, datetime, timezone
 from typing import Sequence
-
 from app.models import (
     NQ_POINT_VALUE,
     NQ_TICK_SIZE,
@@ -110,16 +107,15 @@ class ModelContractTests(unittest.TestCase):
         self.assertEqual(BacktestConfig(quantity=10, cost_points_per_trade=2.0).quantity, 10)
 
     def test_config_uses_and_retains_trade_cost(self) -> None:
-        self.assertEqual(BacktestConfig(quantity=1, cost_points_per_trade=2.0).cost_points_per_trade, 2.0)
+        self.assertEqual(BacktestConfig(quantity=1, cost_points_per_trade=0).cost_points_per_trade, 0)
         self.assertEqual(
             BacktestConfig(quantity=1, cost_points_per_trade=1.5).cost_points_per_trade,
             1.5,
         )
 
     def test_config_requires_trade_cost(self) -> None:
-        """Require an explicit trade cost even when the quantity is valid."""
-        with self.assertRaises(TypeError):
-            BacktestConfig(quantity=1)
+        with self.assertRaisesRegex(TypeError, 'cost_points_per_trade'):
+            BacktestConfig(quantity=1)  # type: ignore[call-arg]
 
     def test_config_rejects_out_of_range_quantities(self) -> None:
         for quantity in (0, 11):
@@ -146,6 +142,12 @@ class ModelContractTests(unittest.TestCase):
                         quantity=1,
                         cost_points_per_trade=cost,
                     )
+
+    def test_config_rejects_costs_that_overflow_dollars(self):
+        for cost in (1e308, 10**400):
+            with self.subTest(cost=cost):
+                with self.assertRaisesRegex(ValueError, 'finite dollar cost'):
+                    BacktestConfig(quantity=1, cost_points_per_trade=cost)
 
     def test_position_and_trade_cannot_be_flat(self) -> None:
         with self.assertRaises(ValueError):

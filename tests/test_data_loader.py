@@ -1,14 +1,12 @@
-'''Focused tests for the NQ CSV to Bar boundary.'''
-
+# Test the NQ CSV to Bar boundary.
 from __future__ import annotations
-
 import csv
+import hashlib
 import tempfile
 import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
-
-from app.data_loader import load_nq_data
+from app.data_loader import load_nq_data, load_nq_data_with_hash
 from app.models import Bar
 
 
@@ -65,6 +63,14 @@ class DataLoaderTests(unittest.TestCase):
         self.assertEqual(bars[0].volume, 47)
         self.assertEqual(bars[0].close, 19000.5)
 
+    def test_hashed_loader_reports_exact_csv_bytes_and_same_bars(self) -> None:
+        path = self.write_rows([self.make_row()])
+        path.write_bytes(b'\xef\xbb\xbf' + path.read_bytes())
+        bars, digest = load_nq_data_with_hash(path)
+
+        self.assertEqual(bars, load_nq_data(path))
+        self.assertEqual(digest, hashlib.sha256(path.read_bytes()).hexdigest())
+
     def test_naive_timestamp_remains_naive(self) -> None:
         row = self.make_row(Date='2024-06-11T00:00:00')
         bar = load_nq_data(self.write_rows([row]))[0]
@@ -115,6 +121,13 @@ class DataLoaderTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'Invalid Open price'):
                     load_nq_data(self.write_rows([self.make_row(Open=value)]))
 
+    def test_nonpositive_ohlc_fail(self) -> None:
+        for column in ('Open', 'High', 'Low', 'Close'):
+            for value in ('0', '-0.25'):
+                with self.subTest(column=column, value=value):
+                    with self.assertRaisesRegex(ValueError, f'Invalid {column} price'):
+                        load_nq_data(self.write_rows([self.make_row(**{column: value})]))
+
     def test_negative_and_nonintegral_volume_fail(self) -> None:
         for value, message in (('-1', 'Negative volume'), ('100.7', 'Invalid Volume')):
             with self.subTest(value=value):
@@ -127,6 +140,18 @@ class DataLoaderTests(unittest.TestCase):
 
     def test_blank_contract_fails(self) -> None:
         for value in ('', '   '):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, 'Invalid contract'):
+                    load_nq_data(self.write_rows([self.make_row(contract=value)]))
+
+    def test_valid_nq_contract_codes_are_accepted(self) -> None:
+        for value, expected in (('NQU4', 'NQU4'), ('NQH25', 'NQH25'), (' NQM4 ', 'NQM4')):
+            with self.subTest(value=value):
+                bar = load_nq_data(self.write_rows([self.make_row(contract=value)]))[0]
+                self.assertEqual(bar.contract, expected)
+
+    def test_invalid_nq_contract_codes_fail(self) -> None:
+        for value in ('ESM4', 'MNQM4', 'NQF4', 'NQM', 'NQ4', 'NQM444', 'nqm4', 'NQM4x'):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, 'Invalid contract'):
                     load_nq_data(self.write_rows([self.make_row(contract=value)]))
