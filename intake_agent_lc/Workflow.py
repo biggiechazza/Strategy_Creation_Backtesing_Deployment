@@ -21,7 +21,7 @@ from psycopg import Connection, Error
 from langgraph.runtime import Runtime
 from database.strategy_repository import (Duplicate_Name_Prob, create_strategy_with_initial_version,)
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[1] / ".envapi")
 
 model = init_chat_model('gpt-6-luna')
 
