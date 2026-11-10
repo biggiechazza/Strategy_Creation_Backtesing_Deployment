@@ -6,6 +6,7 @@ import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from _workflow_isolation_support import load_isolated_workflow
 
 
 SOURCE = '''from app.models import Signal
@@ -40,7 +41,7 @@ class IntakeApprovalTests(unittest.TestCase):
         self.patches.enter_context(patch(
             "langchain.chat_models.init_chat_model", return_value=self.model,
         ))
-        self.workflow = importlib.import_module("intake_agent_lc.Workflow")
+        self.workflow = load_isolated_workflow(self.patches)
         self.patches.enter_context(patch.object(self.workflow, "model", self.model))
 
     def test_only_explicit_approve_all_and_model_approval_can_save(self):

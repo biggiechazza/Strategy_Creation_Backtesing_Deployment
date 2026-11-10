@@ -7,7 +7,9 @@ checks verify how the helper uses a transaction, not PostgreSQL's own behavior.
 import re
 import unittest
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+from psycopg import OperationalError
 from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 
@@ -105,8 +107,35 @@ class RecordingCursor:
             raise AssertionError("Unexpected extra RETURNING row request") from None
 
 
+def connection_fixture(rows):
+    """Supply scripted rows while exposing transaction and cursor context calls."""
+    conn = MagicMock()
+    conn.info = SimpleNamespace(transaction_status=TransactionStatus.IDLE)
+    transaction = conn.transaction.return_value
+    transaction.__exit__.return_value = False
+    cursor = conn.cursor.return_value.__enter__.return_value
+    conn.cursor.return_value.__exit__.return_value = False
+    cursor.fetchone.side_effect = rows
+    return conn, cursor, transaction
+
+
 class StrategyCreationTests(unittest.TestCase):
     """Call the saved creation helper directly rather than replacing it."""
+
+    def assert_insert_contract(self, sql, table, columns, returned_column):
+        """Check required identifiers while tolerating query whitespace and keyword case."""
+        match = re.search(
+            r"\bINSERT\s+INTO\s+public\." + re.escape(table)
+            + r"\s*\(([^)]+)\)\s*VALUES\b",
+            sql, re.IGNORECASE | re.DOTALL,
+        )
+        self.assertIsNotNone(match, "Expected an explicit column list on the insert")
+        actual_columns = [part.strip().casefold() for part in match.group(1).split(",")]
+        self.assertEqual(actual_columns, columns)
+        self.assertRegex(
+            sql,
+            r"(?is)\bRETURNING\s+" + re.escape(returned_column) + r"\s*;?\s*$",
+        )
 
     def test_success_commits_strategy_and_initial_version_before_returning_ids(self):
         """Check the two inserts share one transaction and retain the supplied source."""
@@ -134,8 +163,22 @@ class StrategyCreationTests(unittest.TestCase):
                 self.assertIs(conn.row_factory, dict_row)
                 strategy_sql, strategy_params = conn.committed[0]
                 version_sql, version_params = conn.committed[1]
-                self.assertIn("ON CONFLICT", strategy_sql.upper())
-                self.assertIn("DO NOTHING", strategy_sql.upper())
+                self.assert_insert_contract(
+                    strategy_sql, "strategies", ["name", "description"], "strategy_id",
+                )
+                self.assertRegex(
+                    strategy_sql,
+                    r"(?is)\bON\s+CONFLICT\s*\(\s*name\s*\)\s+DO\s+NOTHING\b",
+                )
+                self.assertRegex(
+                    strategy_sql,
+                    r"(?i)\bVALUES\s*\(\s*%s\s*,\s*%s\s*\)",
+                )
+                self.assert_insert_contract(
+                    version_sql, "strategy_versions",
+                    ["strategy_id", "version_number", "entrypoint_name", "source_code"],
+                    "strategy_version_id",
+                )
                 self.assertEqual(strategy_params, ("Review strategy", stored_description))
                 self.assertRegex(
                     version_sql,
@@ -175,3 +218,51 @@ class StrategyCreationTests(unittest.TestCase):
         self.assertEqual(conn.committed, [])
         self.assertEqual(conn.pending, [])
         self.assertEqual(conn.info.transaction_status, TransactionStatus.IDLE)
+
+    def test_missing_version_id_raises_inside_the_transaction(self):
+        """A missing RETURNING row must exit through the transaction's failure path."""
+        conn, cursor, transaction = connection_fixture([{"strategy_id": 811}, None])
+        with self.assertRaisesRegex(RuntimeError, "strategy_version_id") as raised:
+            create_strategy_with_initial_version(
+                conn, name="Missing version review", source_code=SOURCE,
+                entrypoint_name="ReviewStrategy",
+            )
+        self.assertEqual(cursor.execute.call_count, 2)
+        transaction.__exit__.assert_called_once()
+        error_type, error, traceback = transaction.__exit__.call_args.args
+        self.assertIs(error_type, RuntimeError)
+        self.assertIs(error, raised.exception)
+        self.assertIsNotNone(traceback)
+
+    def test_commit_exception_propagates_without_returning_a_success_result(self):
+        """A lost commit response must propagate without asserting that rollback occurred."""
+        conn, cursor, transaction = connection_fixture([
+            {"strategy_id": 811}, {"strategy_version_id": 9811},
+        ])
+        failure = OperationalError("Gap review fixture lost the commit response")
+        transaction.__exit__.side_effect = failure
+        with self.assertRaises(OperationalError) as raised:
+            create_strategy_with_initial_version(
+                conn, name="Commit response review", source_code=SOURCE,
+                entrypoint_name="ReviewStrategy",
+            )
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(cursor.execute.call_count, 2)
+        transaction.__exit__.assert_called_once_with(None, None, None)
+
+    def test_non_idle_connection_is_rejected_before_transaction_or_cursor_creation(self):
+        """The helper must not silently become a savepoint in someone else's transaction."""
+        for status in (
+            TransactionStatus.ACTIVE, TransactionStatus.INTRANS,
+            TransactionStatus.INERROR, TransactionStatus.UNKNOWN,
+        ):
+            with self.subTest(status=status.name):
+                conn, cursor, transaction = connection_fixture([])
+                conn.info.transaction_status = status
+                with self.assertRaisesRegex(ValueError, "idle connection"):
+                    create_strategy_with_initial_version(
+                        conn, name="Busy connection review", source_code=SOURCE,
+                        entrypoint_name="ReviewStrategy",
+                    )
+                conn.transaction.assert_not_called()
+                conn.cursor.assert_not_called()
