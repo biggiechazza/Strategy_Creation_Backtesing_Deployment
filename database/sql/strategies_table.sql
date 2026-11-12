@@ -1,4 +1,4 @@
-CREATE TABLE strategies (
+CREATE TABLE public.strategies (
     strategy_id BIGINT GENERATED ALWAYS AS IDENTITY (START WITH 1000) PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     description TEXT,
