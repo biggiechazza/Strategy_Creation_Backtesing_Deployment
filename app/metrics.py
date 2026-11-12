@@ -1,41 +1,50 @@
-# Summarize completed NQ trades into the shared BacktestResult model.
+# Summarize completed trades after the engine has applied costs
+
 from __future__ import annotations
 from collections.abc import Sequence
 from math import isfinite
 from app.models import BacktestResult, Trade
 
+
+# NaN, infinity, and overflow cannot be stored as usable metrics
 def _require_finite(value: float, name: str) -> None:
-    '''Reject values that cannot be stored as finite metrics.'''
     try:
         if isfinite(value):
             return
+
+    # isfinite may itself overflow on a huge integer
     except OverflowError:
         pass
     raise ValueError(f'{name} must be finite')
 
 
+# Summarize the supplied trades in engine order using net dollar P&L
+# win_rate is a fraction, and profit_factor stays None when there are no losses
+# No trades means zero counts and dollar results, nonfinite calculations raise ValueError
 def calculate_results(trades: Sequence[Trade]) -> BacktestResult:
-    '''Calculate net-P&L metrics from completed trades in engine order.
-    Break-even trades count toward total trades. Profit factor is undefined
-    without losses, and drawdown starts from a zero-dollar peak.'''
     completed_trades = tuple(trades)
     winning_trades = 0
     losing_trades = 0
     gross_profit = 0.0
     gross_loss = 0.0
     cumulative_pnl = 0.0
+
+    # An initial loss counts as drawdown, so the starting peak is zero
     peak = 0.0
     max_drawdown = 0.0
 
+    # Individually finite trades can still overflow a running total
     for trade in completed_trades:
         net_pnl = trade.net_pnl
         _require_finite(net_pnl, 'Trade net P&L')
         cumulative_pnl += net_pnl
         _require_finite(cumulative_pnl, 'Cumulative net P&L')
+
         peak = max(peak, cumulative_pnl)
         drawdown = peak - cumulative_pnl
         _require_finite(drawdown, 'Drawdown')
         max_drawdown = max(max_drawdown, drawdown)
+
         if net_pnl > 0:
             winning_trades += 1
             gross_profit += net_pnl
@@ -45,7 +54,10 @@ def calculate_results(trades: Sequence[Trade]) -> BacktestResult:
             gross_loss -= net_pnl
             _require_finite(gross_loss, 'Gross loss')
 
+    # Breakeven trades remain in the totals used for win rate and average trade
     total_trades = len(completed_trades)
+
+    # Without losses there is nothing to divide by, leave the ratio undefined
     profit_factor = gross_profit / gross_loss if gross_loss else None
     if profit_factor is not None:
         _require_finite(profit_factor, 'Profit factor')

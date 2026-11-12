@@ -1,2 +1,1 @@
-"""Core application package for the NQ strategy research platform."""
-
+# Core app package for loading, backtesting, and summarizing NQ strategies

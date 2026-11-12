@@ -1,4 +1,4 @@
-# Check that terminal cost input is explicit and allows a deliberate zero.
+'''Check terminal cost input and intake outcomes without live model or database calls.'''
 import io
 import sys
 import unittest
@@ -50,6 +50,77 @@ class MainTests(unittest.TestCase):
                 patch.object(Main, 'run') as run:
             self.assertEqual(Main.main(), 0)
         run.assert_called_once_with(conn, version_id=1000, quantity=1, cost_points=0.0)
+
+    def test_intake_uses_checked_connection_and_returns_success(self):
+        '''Check a confirmed save uses the verified connection and exits its context.
+
+        A fake connection satisfies the database check. Replacing the intake
+        module prevents model setup when the command imports it.
+        '''
+        conn = MagicMock()
+        conn.__enter__.return_value = conn
+        cursor = conn.cursor.return_value.__enter__.return_value
+        cursor.fetchone.return_value = ('strategy_app_test',)
+
+        fake_intake = SimpleNamespace(
+            run_intake = MagicMock(return_value={'save_status': 'saved'}))
+        
+        with patch('sys.argv', ['strategy_app', 'intake']), \
+                patch.object(Main, 'getpass', return_value='unused'), \
+                patch.object(Main, 'connect_database', return_value=conn), \
+                patch.dict(sys.modules, {'intake_agent_lc.Workflow': fake_intake}):
+            self.assertEqual(Main.main(), 0)
+
+        cursor.execute.assert_called_once_with('SELECT current_database()')
+        fake_intake.run_intake.assert_called_once_with(conn)
+
+        conn.__exit__.assert_called_once()
+
+    def test_intake_stops_without_success_or_raw_errors(self):
+        '''Check unsuccessful outcomes return nonzero without exposing raw errors.
+
+        Give each case its own connection and fake intake call. Cover normal
+        stops, errors, Ctrl+C, and input ending without retrying the conversation.
+        '''
+        private_detail = 'private provider detail'
+
+        cases = (
+            ('validated_only', {'validation_status': 'passed'}, None, 1, None),
+            ('save_failed', {'save_status': 'failed'}, None, 1, None),
+            ('blocked', {'validation_status': 'blocked'}, None, 1, None),
+            ('rejected', {'incompatibility_status': 'rejected'}, None, 1, None),
+            ('no_proposal', {'incompatibility_status': 'no_viable_proposal'}, None, 1, None),
+            ('model_error', None, RuntimeError(private_detail), 1, 'Intake stopped (RuntimeError).'),
+            ('cancelled', None, KeyboardInterrupt(), 130, 'Intake cancelled.'),
+            ('input_ended', None, EOFError(), 130, 'Intake cancelled.'),
+        )
+
+        for name, state, error, expected_code, expected_message in cases:
+            with self.subTest(name=name):
+
+                conn = MagicMock()
+                conn.__enter__.return_value = conn
+                conn.cursor.return_value.__enter__.return_value.fetchone.return_value = ('strategy_app_test',)
+
+                fake_intake = SimpleNamespace(
+                    run_intake=MagicMock(return_value=state, side_effect=error)
+                )
+                output = io.StringIO()
+
+                with patch('sys.argv', ['strategy_app', 'intake']), \
+                        patch.object(Main, 'getpass', return_value='unused'), \
+                        patch.object(Main, 'connect_database', return_value=conn), \
+                        patch.dict(sys.modules, {'intake_agent_lc.Workflow': fake_intake}), \
+                        redirect_stdout(output):
+                    self.assertEqual(Main.main(), expected_code)
+
+                fake_intake.run_intake.assert_called_once_with(conn)
+                conn.__exit__.assert_called_once()
+
+                self.assertNotIn(private_detail, output.getvalue())
+                if expected_message:
+                    self.assertIn(expected_message, output.getvalue())
+                    self.assertIn('check the database before retrying.', output.getvalue())
 
     def test_run_starts_before_loading_and_completes_with_both_hashes(self):
         conn = object()
