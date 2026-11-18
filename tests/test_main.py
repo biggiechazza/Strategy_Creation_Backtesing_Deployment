@@ -27,6 +27,66 @@ class MainTests(unittest.TestCase):
             if name.startswith('db_strategy_') and name not in before:
                 del sys.modules[name]
 
+    def test_menu_runs_intake_backtest_and_show_in_one_launch(self):
+        '''Dispatch all three selections using a fresh checked connection each time.'''
+        intake_conn, run_conn, show_conn = connections = [MagicMock() for _ in range(3)]
+        for conn in connections:
+            conn.__enter__.return_value = conn
+            cursor = conn.cursor.return_value.__enter__.return_value
+            cursor.fetchone.return_value = ('strategy_app_test',)
+        fake_intake = SimpleNamespace(
+            run_intake=MagicMock(return_value={'save_status': 'saved'}),
+        )
+        output = io.StringIO()
+        saved_run = {'run_id': 3001, 'status': 'completed'}
+
+        with (
+            patch('sys.argv', ['strategy_app']),
+            patch('builtins.input', side_effect=['1', '2', '2001', '', '0', '3', '3001', '4']),
+            patch.object(Main, 'getpass', return_value='unused') as getpass,
+            patch.object(Main, 'connect_database', side_effect=connections),
+            patch.dict(sys.modules, {'intake_agent_lc.Workflow': fake_intake}),
+            patch.object(Main, 'run') as run,
+            patch.object(Main, 'get_run', return_value=saved_run) as get_run,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(Main.main(), 0)
+
+        getpass.assert_called_once()
+        fake_intake.run_intake.assert_called_once_with(intake_conn)
+        run.assert_called_once_with(run_conn, version_id=2001, quantity=1, cost_points=0.0)
+        get_run.assert_called_once_with(show_conn, run_id=3001)
+        for conn in connections:
+            cursor = conn.cursor.return_value.__enter__.return_value
+            cursor.execute.assert_called_once_with('SELECT current_database()')
+            conn.__exit__.assert_called_once()
+        self.assertIn(repr(saved_run), output.getvalue())
+        self.assertIn('Goodbye.', output.getvalue())
+
+    def test_menu_recovers_from_invalid_input_missing_run_and_cancelled_action(self):
+        '''Keep the menu usable after ordinary errors and cancellation.'''
+        conn = MagicMock()
+        conn.__enter__.return_value = conn
+        conn.cursor.return_value.__enter__.return_value.fetchone.return_value = ('strategy_app_test',)
+        output = io.StringIO()
+
+        with (
+            patch('sys.argv', ['strategy_app']),
+            patch('builtins.input', side_effect=['?', '3', 'not an ID', '3', '99', '3', KeyboardInterrupt(), '4']),
+            patch.object(Main, 'getpass', return_value='unused'),
+            patch.object(Main, 'connect_database', return_value=conn) as connect,
+            patch.object(Main, 'get_run', return_value=None),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(Main.main(), 0)
+
+        connect.assert_called_once()
+        self.assertIn('Choose a number from 1 to 4.', output.getvalue())
+        self.assertIn('Enter a whole number', output.getvalue())
+        self.assertIn('Run 99 was not found', output.getvalue())
+        self.assertIn('Action cancelled.', output.getvalue())
+        self.assertIn('Goodbye.', output.getvalue())
+
     def test_run_requires_cost_points_before_database_access(self):
         errors = io.StringIO()
         with patch('sys.argv', ['strategy_app', 'run', '1000']), \
