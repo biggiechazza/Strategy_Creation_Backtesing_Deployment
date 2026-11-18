@@ -20,7 +20,7 @@ class IntakeWorkflowTests(unittest.TestCase):
     def setUp(self):
         '''Mock external setup before importing intake and isolate each conversation.
 
-        A fresh saver prevents the fixed thread ID from reusing an earlier test.
+        A fresh saver keeps each test's graph independent.
         Cleanup restores the patches even when a test fails.
         '''
         self.mocks = ExitStack()
@@ -222,7 +222,7 @@ class FixtureStrategy:
     def test_rejection_and_validation_stops_do_not_save(self):
         '''Check rejection and validation endings stop before any repository call.
 
-        Each case needs fresh checkpoints because subtests share the same setup.
+        Each case supplies its own compiled graph and model responses.
         None of these fixtures should reach the name or description prompts.
         '''
         source = '''from app.models import Signal
@@ -671,6 +671,47 @@ class IntakeWorkflowGapTests(unittest.TestCase):
             w.ExamineResult, w.IncompatibilityResult, w.CompatibilityDecision,
             w.QuestionsResult, w.FormattingResult,
         ])
+        self.assertFalse(self.model.steps)
+
+    def test_intake_starts_fresh_after_success_and_cancellation(self):
+        """Reuse the production graph with clean checkpoint state for each conversation."""
+        w = self.workflow
+        for _ in range(2):
+            self.model.add(
+                w.ExamineResult, w.ExamineResult(status="ready"),
+                w.system_prompt_node_3,
+            )
+            self.model.add(
+                w.FormattingResult,
+                w.FormattingResult(
+                    status="ready_for_validation", formatted_source=ORIGINAL_SOURCE,
+                    entrypoint_name="OriginalStrategy",
+                ),
+                w.system_prompt_formatting,
+            )
+        answers = ["first.py", "First", "", KeyboardInterrupt(), "second.py", "Second", ""]
+        saved_ids = [
+            {"strategy_id": 1001, "strategy_version_id": 2001},
+            {"strategy_id": 1002, "strategy_version_id": 2002},
+        ]
+
+        with (
+            patch("builtins.input", side_effect=answers),
+            patch.object(w, "Path", return_value=self.fake_strategy_file()),
+            patch.object(w, "create_strategy_with_initial_version", side_effect=saved_ids) as save,
+            redirect_stdout(io.StringIO()),
+        ):
+            first = w.run_intake(object())
+            self.assertEqual(list(w.checkpointer.list(None)), [])
+            with self.assertRaises(KeyboardInterrupt):
+                w.run_intake(object())
+            self.assertEqual(list(w.checkpointer.list(None)), [])
+            second = w.run_intake(object())
+
+        self.assertEqual(first["strategy_version_id"], 2001)
+        self.assertEqual(second["strategy_version_id"], 2002)
+        self.assertEqual([call.kwargs["name"] for call in save.call_args_list], ["First", "Second"])
+        self.assertEqual(list(w.checkpointer.list(None)), [])
         self.assertFalse(self.model.steps)
 
     def test_production_graph_checkpoints_file_retry_and_resumes_to_metadata(self):
