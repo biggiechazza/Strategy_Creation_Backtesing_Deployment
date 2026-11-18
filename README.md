@@ -4,7 +4,7 @@ This application was built to backtest or simulate trading strategies/algorithms
 
 The intake agent adapts existing strategy files for the engine through clarification, approval of required behavior changes, and static validation.
 
-The terminal currently provides three commands: "intake" to adapt and save a strategy in PostgreSQL, "run" to backtest a saved strategy version, and "show" to retrieve a saved execution. The application runs one command per launch. After intake, backtesting, or result retrieval finishes, it returns to the terminal prompt. Run another command to continue using the application. There is currently no persistent menu
+Launch the app without arguments to open the terminal menu. After an action finishes, the app returns to the menu. You can still run `intake`, `run`, or `show` directly as a single command.
 
 **This is an early version of the full scope of this project which is already large, many improvements and changes will be added, but for now this application does require some setup and specific configurations before use**
 
@@ -22,7 +22,7 @@ The terminal currently provides three commands: "intake" to adapt and save a str
 
 ```mermaid
 flowchart TD
-    Terminal["Terminal: intake, run, show"] -->|intake| Intake["intake_agent_lc: examine, clarify, adapt, validate"]
+    Terminal["Terminal menu and direct commands"] -->|intake| Intake["intake_agent_lc: examine, clarify, adapt, validate"]
     Source["Local Python strategy file"] --> Intake
     Intake <-->|structured responses| Model["Configured language model"]
     Intake --> Repositories["database: Python repository functions"]
@@ -58,7 +58,7 @@ To follow the setup instructions below, you'll need:
 - **A local Python strategy file for intake.** The terminal asks for its path and any information needed to adapt it.
 - **Historical data for backtesting.** Use a compatible CSV named `nq_active_1min_backtestingpy.csv` in the project root. Intake and retrieval do not need this file.
 
-After cloning, install the packages from `requirements.txt` and complete the database setup below. Each command asks for your PostgreSQL password through a hidden terminal prompt.
+After cloning, install the packages from `requirements.txt` and complete the database setup below.
 
 #### Optional configuration changes
 
@@ -104,7 +104,25 @@ All three commands use PostgreSQL. In pgAdmin or another SQL client follow these
 2. Connect the query tool to that database and run [postgres_schema.sql](database/sql/postgres_schema.sql) once. It creates all four tables and is an alternative to running the individual table scripts.
 3. Keep the PostgreSQL server running while using the application.
 
-The CLI connects to `localhost:5432` as `postgres` and asks for the password without displaying it. It checks the actual database name before handling any command.
+A fresh clone starts with zero saved strategy versions and zero backtest runs. The schema creates empty tables, and your strategy versions and runs are saved in your local PostgreSQL database as you use the app. Bring your own Python strategy file for intake and historical NQ CSV for backtesting.
+
+The CLI connects to `localhost:5432` as `postgres` and checks that it reached `strategy_app_test` before running each action. Password input is hidden. Direct commands ask for the password on each launch. The menu asks when you first choose an action that needs the DB and reuses the password for later actions. Each action opens and closes its own connection.
+
+### Open the terminal menu
+
+From the project root, run the app without a command.
+
+```powershell
+& '.\.env1\Scripts\python.exe' -m app.Main
+```
+
+Choose **1** to intake a strategy, **2** to run a backtest, **3** to show a saved run, or **4** to exit.
+
+### Your first backtest
+
+1. Configure your API key and use option **1** to save your first strategy. Write down the **strategy version ID** that intake prints. [Intake a strategy](#intake-a-strategy)
+2. Put the historical CSV in the project root and use option **2** with that **strategy version ID**. After the backtest completes, write down its **run ID**. [Run a backtest](#run-a-backtest)
+3. Use option **3** with that **run ID** to see the saved results. [Retrieve a saved execution](#retrieve-a-saved-execution)
 
 ### Intake a strategy
 
@@ -118,7 +136,7 @@ OPENAI_API_KEY = your_api_key_here
 
 Replace the placeholder with your own key. The saved workflow explicitly loads this file, which is ignored by Git. It currently configures `gpt-6-luna`, so the key needs access to that model. Intake uses live model calls. The `run` and `show` commands do not initialize the model or require this key.
 
-Start intake from the project root:
+Choose **1** from the menu, or run intake directly from the project root.
 
 ```powershell
 & '.\.env1\Scripts\python.exe' -m app.Main intake
@@ -145,7 +163,9 @@ Prices must be positive, finite, and aligned to the 0.25 point NQ tick. Timestam
 
 Strategy and market data inputs are not currently shipped as runnable examples.
 
-Run from the project root and enter the saved **strategy version ID** when prompted:
+Choose **2** from the menu and enter the saved **strategy version ID**, quantity, and cost per trade in NQ points. Leave quantity blank to use `1` and enter `0` for no cost.
+
+To run a backtest directly from the project root, use the following commands.
 
 ```powershell
 $versionId = Read-Host 'Strategy version ID'
@@ -159,6 +179,8 @@ The command prints the run ID, completed trade count, and net P&L. Keep the **ru
 ### Retrieve a saved execution
 
 Retrieval needs only the database and a saved run ID. It does not need the CSV, original strategy file, or model credentials.
+
+Choose **3** from the menu and enter the saved **run ID**. To retrieve the run directly, use the following commands.
 
 ```powershell
 $runId = Read-Host 'Run ID'
@@ -176,15 +198,13 @@ Once initial setup is complete, open PowerShell and navigate to your existing pr
 Set-Location -LiteralPath 'C:\path\to\Strategy_Creation_Backtesing_Deployment'
 ```
 
-Ensure your local PostgreSQL server is running. To start strategy intake using the existing Python environment:
+Start PostgreSQL if needed and reopen the menu using your existing `.env1` environment and `strategy_app_test` database.
 
 ```powershell
-& '.\.env1\Scripts\python.exe' -m app.Main intake
+& '.\.env1\Scripts\python.exe' -m app.Main
 ```
 
-Enter your PostgreSQL password when prompted. Password input is hidden. The application then asks for the path to your Python strategy file.
-
-These steps assume your `.env1` environment and API credentials are already configured. Use the `run` and `show` commands documented above to backtest a saved strategy version or retrieve an existing run.
+Your saved strategy versions and runs stay in the database after you exit the app. Use option **2** with a saved strategy version ID to run another backtest, or option **3** with a saved run ID to see an earlier result. Choose **1** to intake another strategy or **4** to exit.
 
 ### Some usage notes
 
@@ -202,11 +222,12 @@ These steps assume your `.env1` environment and API credentials are already conf
 
 ## Testing
 
-On November 12, 2026, [this GitHub Actions run](https://github.com/biggiechazza/Strategy_Creation_Backtesing_Deployment/actions/runs/43268528683) passed **133 tests with no skips** for [commit d8cde9b](https://github.com/biggiechazza/Strategy_Creation_Backtesing_Deployment/commit/d8cde9bba1ba85af1316a0a89e09dd83e87f6e8c). The environment used Ubuntu 24.04, Python 3.14.10, and PostgreSQL 18.6. Dependencies were installed from `requirements.txt`, checked with `pip check`, and imported before the schema and tests ran.
+On November 18, 2026, GitHub Actions passed **136 tests with no skips** on `staging` commit `9492a49`. The environment used Ubuntu 24.04, Python 3.14.10, and PostgreSQL 18.7. The workflow checked dependencies and imports, then loaded the schema before running the tests. [CI run](https://github.com/biggiechazza/Strategy_Creation_Backtesing_Deployment/actions/runs/44398149440) · [Tested commit](https://github.com/biggiechazza/Strategy_Creation_Backtesing_Deployment/commit/9492a499f247dae46bee981e780bc3df61771430)
 
 - **Application tests** cover data validation, strategy loading, execution rules, rollover behavior, costs, metrics, CLI behavior, and repository transactions.
+- **Menu tests** cover running intake, backtesting, and retrieval in one launch, plus recovery after invalid input or cancellation.
 - **Four live PostgreSQL tests** check committed records through new connections, rollback of partial completion results, failed run status, and use of the public schema.
-- **Intake tests** use mocked model responses and repository calls to check pauses and resumes, clarification, compatibility approval, validation correction, duplicate names, and save errors. They do not demonstrate a live model conversation saving to PostgreSQL.
+- **Intake tests** use mocked model responses and repository calls to check pauses and resumes, clarification, compatibility approval, validation correction, duplicate names, save errors, and fresh state across intakes in one launch. They do not demonstrate a live model conversation saving to PostgreSQL.
 
 For full local discovery:
 
@@ -234,7 +255,7 @@ The current v1 limits are:
 
 - **Intake and source trust.** Validation inspects source without executing the submitted strategy. Passing static checks does not establish runtime correctness, faithful trading behavior, profitability, or execution safety. Backtests execute stored Python in the application process without a sandbox, so that source must be trusted.
 - **Execution and metrics.** The engine holds one position and fills at completed bar closes. Contract changes reset the strategy and history and discard an open trade spanning the change. Any position remaining at the end closes at the final bar close. Drawdown uses completed trade net P&L and does not measure unrealized movement inside an open trade.
-- **Conversation and recovery.** Intake checkpoints last only within the current process, with one intake per program launch. Durable conversation recovery, automatic recovery after a hard process kill, and reconciliation of uncertain intake commit outcomes remain unfinished. Check the DB before retrying an unconfirmed save.
+- **Conversation and recovery.** You can start multiple intakes from the same menu. Each starts with fresh state, and the app clears its in-memory checkpoints when it ends. Durable conversation recovery, automatic recovery after a hard process kill, and reconciliation of uncertain intake commit outcomes remain unfinished. Check the DB before retrying an unconfirmed save.
 - **Configuration and versions.** The CSV filename and test DB target are fixed. Intake creates new strategies with version 1, and the CLI does not append versions to an existing strategy.
 
 ## Further documentation
