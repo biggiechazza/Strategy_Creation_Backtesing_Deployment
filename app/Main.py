@@ -5,6 +5,7 @@ import hashlib
 from getpass import getpass
 from pathlib import Path
 from pprint import pprint
+from psycopg import OperationalError
 from app.data_loader import load_nq_data_with_hash
 from app.engine import run_backtest
 from app.metrics import calculate_results
@@ -15,6 +16,7 @@ from database.run_repository import complete_run, fail_run, get_run, start_run
 from database.strategy_repository import get_strategy_version
 
 TEST_DATABASE = 'strategy_app_test'
+PASSWORD_PROMPT = 'PostgreSQL password for postgres: '
 
 # Find the CSV from the project folder, regardless of where the terminal was opened
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -84,28 +86,8 @@ def run(conn, *, version_id: int, quantity: int, cost_points: float) -> int:
     return run_id
 
 
-# Run a selected strategy version or look up an earlier execution from the terminal
-# run() uses a strategy version ID, show uses a saved run ID
-# Successful commands return 0, a missing run returns 1, other errors pass through
-def main() -> int:
-    parser = argparse.ArgumentParser(description='Backtests in strategy_app_test')
-
-    commands = parser.add_subparsers(dest='command', required=True)
-    run_command = commands.add_parser('run', help='Run and save a strategy version')
-    run_command.add_argument('version_id', type=int)
-    run_command.add_argument('--quantity', type=int, default=1)
-
-    # Cost free runs should be an explicit choice
-    run_command.add_argument('--cost-points', type = float, required = True)
-    show_command = commands.add_parser('show', help='Retrieve a saved execution')
-    show_command.add_argument('run_id', type = int)
-        # Intake collects a strategy file and saves it as a new strategy and version 1
-    commands.add_parser('intake', help='Intake and save a Python strategy')
-
-    args = parser.parse_args()
-
-    password = getpass('PostgreSQL password for postgres: ')
-
+# Use the same checked connection and command handling for both terminal entry points
+def execute_command(args: argparse.Namespace, password: str) -> int:
     # Repo files handle each transaction, this block handles connection cleanup even on errors
     with connect_database(database=TEST_DATABASE, user='postgres', password=password) as conn:
 
@@ -143,7 +125,7 @@ def main() -> int:
             return 0 if state.get('save_status') == 'saved' else 1
 
         else:
-        # A single snapshot prevents mismatched run and trade data during concurrent updates
+            # A single snapshot prevents mismatched run and trade data during concurrent updates
             saved = get_run(conn, run_id = args.run_id)
 
             if saved is None:
@@ -152,6 +134,87 @@ def main() -> int:
             pprint(saved, sort_dicts=False)
 
     return 0
+
+
+# Translate menu answers into the same arguments as the direct commands
+def read_menu_args(command: str) -> argparse.Namespace:
+    args = argparse.Namespace(command=command)
+    try:
+        if command == 'run':
+            args.version_id = int(input('Strategy version ID: '))
+            args.quantity = int(input('Quantity [1]: ').strip() or '1')
+            args.cost_points = float(input('Cost per trade in points (enter 0 for none): '))
+        elif command == 'show':
+            args.run_id = int(input('Run ID: '))
+    except ValueError as error:
+        raise ValueError('Enter a whole number for an ID or quantity, and a number for cost.') from error
+    return args
+
+
+def run_menu() -> int:
+    commands = {'1': 'intake', '2': 'run', '3': 'show'}
+    password = None
+    while True:
+        print(
+            '\nNQ Strategy Backtester\n'
+            '1. Intake a strategy\n'
+            '2. Run a backtest\n'
+            '3. Show a saved run\n'
+            '4. Exit'
+        )
+        try:
+            choice = input('Choose an option: ').strip()
+        except (KeyboardInterrupt, EOFError):
+            break
+        if choice == '4':
+            break
+        command = commands.get(choice)
+        if command is None:
+            print('Choose a number from 1 to 4.')
+            continue
+
+        try:
+            args = read_menu_args(command)
+            if password is None:
+                password = getpass(PASSWORD_PROMPT)
+            execute_command(args, password)
+        except EOFError:
+            break
+        except KeyboardInterrupt:
+            print('\nAction cancelled.')
+        except OperationalError:
+            password = None
+            print('PostgreSQL connection failed. Check the server and password, then try again.')
+        except ValueError as error:
+            print(error)
+        except (Exception, SystemExit) as error:
+            print(f'{command.capitalize()} stopped ({type(error).__name__}).')
+
+    print('\nGoodbye.')
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description='Backtests in strategy_app_test',
+        epilog='Launch without a command to open the interactive menu.',
+    )
+
+    commands = parser.add_subparsers(dest='command')
+    run_command = commands.add_parser('run', help='Run and save a strategy version')
+    run_command.add_argument('version_id', type=int)
+    run_command.add_argument('--quantity', type=int, default=1)
+
+    # Cost free runs should be an explicit choice
+    run_command.add_argument('--cost-points', type=float, required=True)
+    show_command = commands.add_parser('show', help='Retrieve a saved execution')
+    show_command.add_argument('run_id', type=int)
+    commands.add_parser('intake', help='Intake and save a Python strategy')
+
+    args = parser.parse_args()
+    if args.command is None:
+        return run_menu()
+    return execute_command(args, getpass(PASSWORD_PROMPT))
 
 
 if __name__ == '__main__':

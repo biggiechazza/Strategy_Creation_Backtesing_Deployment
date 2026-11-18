@@ -797,26 +797,30 @@ def get_terminal_response(question_data):
 # Run intake and resume it whenever a user answers a question
 def run_intake(conn):
 
-    # One intake per program launch, keep this thread through every resume
-    config = {'configurable': {'thread_id': 'intake'}}
+    # Keep a fresh thread for each intake and reuse it for every answer
+    thread_id = uuid.uuid4().hex
+    config = {'configurable': {'thread_id': thread_id}}
     context = {'db_connection': conn}
-    result = intake_graph.invoke({}, config, context=context, version='v2',)
 
-    while result.interrupts:
-        question = result.interrupts[0]
+    try:
+        result = intake_graph.invoke({}, config, context=context, version='v2')
+        while result.interrupts:
+            question = result.interrupts[0]
 
-    # File errors are stored in State rather than the file path question
-        if isinstance(question.value, str) and result.value.get('file_error'):
-            print(result.value['file_error'])
+            # File errors are stored in State rather than the file path question
+            if isinstance(question.value, str) and result.value.get('file_error'):
+                print(result.value['file_error'])
 
-        user_answer = get_terminal_response(question.value)
+            user_answer = get_terminal_response(question.value)
+            resume = Command(resume={question.id: user_answer})
+            result = intake_graph.invoke(resume, config, context=context, version='v2')
 
-        # Send the answer back using the same thread and connection
-        result = intake_graph.invoke(Command(resume={question.id: user_answer}), config, context=context, version='v2',)
+        show_intake_result(result.value)
+        return result.value
+    finally:
+        # Completed and cancelled intakes no longer need their checkpoints
+        intake_graph.checkpointer.delete_thread(thread_id)
 
-        # Show why intake ended before returning its final State
-    show_intake_result(result.value)
-    return result.value
 
 # Show the saved IDs or explain why intake stopped
 def show_intake_result(state):
